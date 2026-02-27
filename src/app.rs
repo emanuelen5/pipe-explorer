@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 
 use crate::executor::{ExecutorCache, StageOutput, execute_pipeline_stages};
 use crate::pipeline::Pipeline;
+use crate::search::SearchState;
 use crate::ui;
 
 /// The display mode for stage output.
@@ -25,6 +26,7 @@ pub enum AppMode {
     Editing,
     Saving,
     ConfirmingDelete,
+    Searching,
 }
 
 /// Messages sent from the background executor task to the main event loop.
@@ -55,6 +57,8 @@ pub struct App {
     pub editor_cursor: usize,
     /// Show help overlay?
     pub show_help: bool,
+    /// Search state (query, cursor, matches, current match index).
+    pub search: SearchState,
     /// True while editing a freshly inserted stage (remove on cancel).
     pending_new_stage: bool,
     /// The executor cache.
@@ -107,6 +111,7 @@ impl App {
             editor_content: String::new(),
             editor_cursor: 0,
             show_help: false,
+            search: SearchState::default(),
             pending_new_stage: false,
             cache: ExecutorCache::new(),
             exec_tx,
@@ -146,6 +151,7 @@ impl App {
                     self.error_message = None;
                 }
                 self.scroll = 0;
+                self.compute_search_matches();
                 true
             }
             Err(_) => false,
@@ -189,6 +195,58 @@ impl App {
         let content = self.current_output_text();
         std::fs::write(path, content.as_bytes())?;
         Ok(())
+    }
+
+    /// (Re-)compute search matches for the current output. Resets match index to 0.
+    pub fn compute_search_matches(&mut self) {
+        let content = self.current_output_text();
+        self.search.compute(&content);
+    }
+
+    /// Enter search mode, clearing any previous query.
+    pub fn start_search(&mut self) {
+        self.search.clear();
+        self.mode = AppMode::Searching;
+    }
+
+    /// Confirm the search query and compute matches.
+    pub fn confirm_search(&mut self) {
+        self.compute_search_matches();
+        self.mode = AppMode::Normal;
+        // Scroll to the first match if any.
+        if let Some(&(line, _, _)) = self.search.matches.first() {
+            self.scroll = line;
+        }
+    }
+
+    /// Cancel search and clear all highlights.
+    pub fn cancel_search(&mut self) {
+        self.search.clear();
+        self.mode = AppMode::Normal;
+    }
+
+    /// Advance to the next search match.
+    pub fn search_next(&mut self) {
+        if self.search.matches.is_empty() {
+            return;
+        }
+        self.search.match_idx = (self.search.match_idx + 1) % self.search.matches.len();
+        let (line, _, _) = self.search.matches[self.search.match_idx];
+        self.scroll = line;
+    }
+
+    /// Go back to the previous search match.
+    pub fn search_prev(&mut self) {
+        if self.search.matches.is_empty() {
+            return;
+        }
+        if self.search.match_idx == 0 {
+            self.search.match_idx = self.search.matches.len() - 1;
+        } else {
+            self.search.match_idx -= 1;
+        }
+        let (line, _, _) = self.search.matches[self.search.match_idx];
+        self.scroll = line;
     }
 
     /// Start editing the current stage's command.
@@ -264,11 +322,13 @@ impl App {
                 self.pipeline.select_next();
                 self.scroll = 0;
                 self.trigger_exec(false);
+                self.compute_search_matches();
             }
             KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
                 self.pipeline.select_prev();
                 self.scroll = 0;
                 self.trigger_exec(false);
+                self.compute_search_matches();
             }
 
             // Editing
@@ -278,11 +338,29 @@ impl App {
                 }
             }
 
-            // Add new stage
-            KeyCode::Char('n') | KeyCode::Char('a') => {
+            // Add new stage (also always available via 'a'; 'n' navigates when search is active)
+            KeyCode::Char('a') => {
                 self.pipeline.insert_after_selected();
                 self.start_editing();
                 self.pending_new_stage = true;
+            }
+
+            // 'n': add new stage when no search is active; next match when search is active
+            KeyCode::Char('n') => {
+                if !self.search.matches.is_empty() {
+                    self.search_next();
+                } else {
+                    self.pipeline.insert_after_selected();
+                    self.start_editing();
+                    self.pending_new_stage = true;
+                }
+            }
+
+            // Navigate to previous search match
+            KeyCode::Char('p') => {
+                if !self.search.matches.is_empty() {
+                    self.search_prev();
+                }
             }
 
             // Delete stage
@@ -319,14 +397,17 @@ impl App {
             KeyCode::Char('1') => {
                 self.output_mode = OutputMode::Stdout;
                 self.scroll = 0;
+                self.compute_search_matches();
             }
             KeyCode::Char('2') => {
                 self.output_mode = OutputMode::Stderr;
                 self.scroll = 0;
+                self.compute_search_matches();
             }
             KeyCode::Char('3') => {
                 self.output_mode = OutputMode::Combined;
                 self.scroll = 0;
+                self.compute_search_matches();
             }
 
             // Pager scrolling
@@ -350,6 +431,16 @@ impl App {
             KeyCode::Char('G') | KeyCode::End => {
                 let total = self.output_line_count();
                 self.scroll = total.saturating_sub(1);
+            }
+
+            // Search
+            KeyCode::Char('/') => {
+                self.start_search();
+            }
+
+            // Clear active search
+            KeyCode::Esc => {
+                self.cancel_search();
             }
 
             // Help
@@ -438,6 +529,59 @@ impl App {
         false
     }
 
+    /// Handle a key event while entering a search query.
+    fn handle_search_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => self.cancel_search(),
+            KeyCode::Enter => self.confirm_search(),
+            KeyCode::Backspace => {
+                if self.search.cursor > 0 {
+                    let pos = self.search.cursor - 1;
+                    self.search.query.remove(pos);
+                    self.search.cursor = pos;
+                }
+            }
+            KeyCode::Delete => {
+                if self.search.cursor < self.search.query.len() {
+                    self.search.query.remove(self.search.cursor);
+                }
+            }
+            KeyCode::Left => {
+                if self.search.cursor > 0 {
+                    let s = &self.search.query[..self.search.cursor];
+                    self.search.cursor = s
+                        .char_indices()
+                        .last()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                }
+            }
+            KeyCode::Right => {
+                if self.search.cursor < self.search.query.len() {
+                    let s = &self.search.query[self.search.cursor..];
+                    let next = s
+                        .char_indices()
+                        .nth(1)
+                        .map(|(i, _)| self.search.cursor + i)
+                        .unwrap_or(self.search.query.len());
+                    self.search.cursor = next;
+                }
+            }
+            KeyCode::Home => {
+                self.search.cursor = 0;
+            }
+            KeyCode::End => {
+                self.search.cursor = self.search.query.len();
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.search.query.insert(self.search.cursor, c);
+                self.search.cursor += c.len_utf8();
+            }
+            _ => {}
+        }
+        false
+    }
+
     /// Handle a terminal event. Returns `true` if the app should quit.
     pub fn handle_event(&mut self, event: Event) -> bool {
         // Close help on any key
@@ -451,6 +595,7 @@ impl App {
                 AppMode::Normal => self.handle_normal_key(key),
                 AppMode::Editing | AppMode::Saving => self.handle_editor_key(key),
                 AppMode::ConfirmingDelete => self.handle_confirm_delete_key(key),
+                AppMode::Searching => self.handle_search_key(key),
             },
             _ => false,
         }

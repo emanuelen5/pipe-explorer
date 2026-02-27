@@ -1040,6 +1040,7 @@ dependencies = [
  "crossterm",
  "futures",
  "ratatui",
+ "regex",
  "sha2",
  "tokio",
 ]
