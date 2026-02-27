@@ -95,11 +95,21 @@ fn run_shell_command(command: &str, stdin_bytes: &[u8]) -> anyhow::Result<StageO
         .stderr(Stdio::piped())
         .spawn()?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(stdin_bytes)?;
-    }
+    // Write stdin on a separate thread to avoid deadlock: if the child's
+    // stdout/stderr pipe buffers fill up while we're still writing stdin,
+    // both sides would block forever.  By writing in a background thread,
+    // wait_with_output() can drain stdout/stderr concurrently.
+    let stdin_handle = child.stdin.take().unwrap();
+    let stdin_data = stdin_bytes.to_vec();
+    let writer = std::thread::spawn(move || {
+        let mut w = stdin_handle;
+        let _ = w.write_all(&stdin_data);
+        // dropping `w` closes the pipe, signalling EOF
+    });
 
     let output = child.wait_with_output()?;
+    let _ = writer.join();
+
     Ok(StageOutput {
         stdout: output.stdout,
         stderr: output.stderr,

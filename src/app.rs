@@ -54,6 +54,8 @@ pub struct App {
     pub editor_cursor: usize,
     /// Show help overlay?
     pub show_help: bool,
+    /// True while editing a freshly inserted stage (remove on cancel).
+    pending_new_stage: bool,
     /// The executor cache.
     cache: ExecutorCache,
     /// Sender for triggering background execution.
@@ -68,10 +70,20 @@ impl App {
         let (inner_tx, exec_rx) = mpsc::channel::<ExecMsg>(8);
 
         // Spawn a background task that runs commands and sends results back.
+        // The actual execution uses spawn_blocking to avoid starving the
+        // tokio runtime with blocking process I/O.
         tokio::spawn(async move {
             let mut cache = ExecutorCache::new();
             while let Some((commands, up_to, force)) = inner_rx.recv().await {
-                let result = execute_pipeline_stages(&mut cache, &commands, up_to, force);
+                let mut c = cache;
+                let (result, returned_cache) =
+                    tokio::task::spawn_blocking(move || {
+                        let r = execute_pipeline_stages(&mut c, &commands, up_to, force);
+                        (r, c)
+                    })
+                    .await
+                    .expect("executor task panicked");
+                cache = returned_cache;
                 let msg = match result {
                     Ok(outputs) => ExecMsg::Done { outputs, error: None },
                     Err(e) => ExecMsg::Done {
@@ -94,6 +106,7 @@ impl App {
             editor_content: String::new(),
             editor_cursor: 0,
             show_help: false,
+            pending_new_stage: false,
             cache: ExecutorCache::new(),
             exec_tx,
             exec_rx,
@@ -196,6 +209,7 @@ impl App {
             stage.command = new_cmd;
         }
         self.mode = AppMode::Normal;
+        self.pending_new_stage = false;
         // Invalidate downstream cache and re-run
         self.cache.clear();
         self.trigger_exec(false);
@@ -203,6 +217,10 @@ impl App {
 
     /// Cancel editing.
     pub fn cancel_edit(&mut self) {
+        if self.pending_new_stage {
+            self.pipeline.remove_selected();
+            self.pending_new_stage = false;
+        }
         self.mode = AppMode::Normal;
         self.editor_content.clear();
         self.editor_cursor = 0;
@@ -263,6 +281,7 @@ impl App {
             KeyCode::Char('n') | KeyCode::Char('a') => {
                 self.pipeline.insert_after_selected();
                 self.start_editing();
+                self.pending_new_stage = true;
             }
 
             // Delete stage
