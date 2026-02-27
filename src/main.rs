@@ -36,6 +36,17 @@ async fn main() -> anyhow::Result<()> {
         None => pipeline::Pipeline::new(vec![]),
     };
 
-    let app = App::new(pipeline);
-    run(app).await
+    let mut app = App::new(pipeline);
+    let result = run(&mut app).await;
+
+    println!(
+        "{}",
+        app.pipeline
+            .stages
+            .iter()
+            .map(|s| s.command.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    );
+    result
 }

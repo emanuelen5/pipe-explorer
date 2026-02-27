@@ -729,11 +729,11 @@ fn editor_inner_width(terminal_width: u16, dialog_max_width: u16) -> usize {
 }
 
 /// Run the TUI event loop.
-pub async fn run(mut app: App) -> Result<()> {
+pub async fn run(app: &mut App) -> Result<()> {
     let mut terminal = setup_terminal()?;
 
     // Ensure terminal is always restored, even on error or panic.
-    let result = run_inner(&mut app, &mut terminal).await;
+    let result = run_inner(app, &mut terminal).await;
 
     // Restore terminal unconditionally before propagating any error.
     restore_terminal(&mut terminal)?;
