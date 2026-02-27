@@ -21,9 +21,9 @@ pub fn render(frame: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // Stages bar
-            Constraint::Min(0),     // Output pager
-            Constraint::Length(1),  // Status bar
+            Constraint::Length(3), // Stages bar
+            Constraint::Min(0),    // Output pager
+            Constraint::Length(1), // Status bar
         ])
         .split(area);
 
@@ -62,16 +62,36 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
         let is_selected = i == app.pipeline.selected;
 
         // Determine if this stage exited with an error.
-        let exit_code = app
-            .stage_outputs
-            .get(i)
-            .and_then(|o| o.exit_code);
+        let exit_code = app.stage_outputs.get(i).and_then(|o| o.exit_code);
         let is_error = matches!(exit_code, Some(code) if code != 0);
 
         let title = if is_error {
             format!(" Stage {} ✗ ", i + 1)
         } else {
             format!(" Stage {} ", i + 1)
+        };
+
+        let stdout_count = app
+            .stage_outputs
+            .get(i)
+            .map(|o| o.stdout_str().lines().count())
+            .unwrap_or(0);
+
+        let stderr_count = app
+            .stage_outputs
+            .get(i)
+            .map(|o| o.stderr_str().lines().count())
+            .unwrap_or(0);
+
+        let line_count_label = match app.output_mode {
+            OutputMode::Stdout => format!("{}/[{}]", stdout_count, stderr_count),
+            OutputMode::Stderr => format!("[{}]/{}", stdout_count, stderr_count),
+            OutputMode::Combined => format!(
+                "{}+{}={}",
+                stdout_count,
+                stderr_count,
+                stdout_count + stderr_count
+            ),
         };
 
         let style = if is_selected && is_error {
@@ -98,10 +118,9 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
         let block = Block::default()
             .borders(Borders::ALL)
             .title(title)
+            .title_bottom(ratatui::text::Line::from(line_count_label).alignment(Alignment::Right))
             .style(style);
-        let paragraph = Paragraph::new(cmd_display)
-            .block(block)
-            .style(style);
+        let paragraph = Paragraph::new(cmd_display).block(block).style(style);
         frame.render_widget(paragraph, stage_areas[i]);
     }
 }
@@ -135,7 +154,9 @@ fn build_highlighted_line(text: &str, line_matches: &[(usize, usize, bool)]) -> 
                 .bg(Color::Yellow)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Black).bg(Color::Rgb(180, 140, 30))
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Rgb(180, 140, 30))
         };
         spans.push(Span::styled(text[start..end].to_owned(), style));
         pos = end;
@@ -152,7 +173,10 @@ fn build_highlighted_line(text: &str, line_matches: &[(usize, usize, bool)]) -> 
 /// Render the output pager area.
 fn render_output(frame: &mut Frame, app: &App, area: Rect) {
     let exit_info = if !app.stage_outputs.is_empty() {
-        let idx = app.pipeline.selected.min(app.stage_outputs.len().saturating_sub(1));
+        let idx = app
+            .pipeline
+            .selected
+            .min(app.stage_outputs.len().saturating_sub(1));
         match app.stage_outputs[idx].exit_code {
             Some(0) => " ✓ ".to_string(),
             Some(code) => format!(" ✗ exit:{} ", code),
@@ -267,8 +291,7 @@ fn render_output(frame: &mut Frame, app: &App, area: Rect) {
                 hint_len,
                 1,
             );
-            let hint_widget = Paragraph::new(hint)
-                .style(Style::default().fg(Color::DarkGray));
+            let hint_widget = Paragraph::new(hint).style(Style::default().fg(Color::DarkGray));
             frame.render_widget(hint_widget, hint_area);
         }
     }
@@ -304,8 +327,14 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 ),
             )
         }
-        AppMode::Editing => ("EDIT".to_string(), "[Enter]confirm  [Esc]cancel".to_string()),
-        AppMode::Saving => ("SAVE".to_string(), "[Enter]confirm  [Esc]cancel".to_string()),
+        AppMode::Editing => (
+            "EDIT".to_string(),
+            "[Enter]confirm  [Esc]cancel".to_string(),
+        ),
+        AppMode::Saving => (
+            "SAVE".to_string(),
+            "[Enter]confirm  [Esc]cancel".to_string(),
+        ),
         AppMode::ConfirmingDelete => (
             "DELETE?".to_string(),
             "[y]confirm delete  [any]cancel".to_string(),
@@ -320,10 +349,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             .bg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
     );
-    let right = Span::styled(
-        format!(" {} ", hints),
-        Style::default().fg(Color::DarkGray),
-    );
+    let right = Span::styled(format!(" {} ", hints), Style::default().fg(Color::DarkGray));
 
     let status = Paragraph::new(Line::from(vec![left, Span::raw("  "), right]));
     frame.render_widget(status, area);
@@ -334,7 +360,12 @@ fn render_search_bar(frame: &mut Frame, app: &App, area: Rect) {
     let cursor_pos = app.search.cursor;
     let content = &app.search.query;
 
-    let prefix = Span::styled("/", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    let prefix = Span::styled(
+        "/",
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
 
     let cursor_spans = if cursor_pos < content.len() {
         let (before, after) = content.split_at(cursor_pos);
@@ -401,10 +432,7 @@ fn render_editor_overlay(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         vec![
             Span::raw(content.clone()),
-            Span::styled(
-                " ",
-                Style::default().fg(Color::Black).bg(Color::White),
-            ),
+            Span::styled(" ", Style::default().fg(Color::Black).bg(Color::White)),
         ]
     };
 
@@ -447,10 +475,7 @@ fn render_save_overlay(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         vec![
             Span::raw(content.clone()),
-            Span::styled(
-                " ",
-                Style::default().fg(Color::Black).bg(Color::White),
-            ),
+            Span::styled(" ", Style::default().fg(Color::Black).bg(Color::White)),
         ]
     };
 
@@ -484,7 +509,12 @@ fn render_confirm_delete_overlay(frame: &mut Frame, app: &App, area: Rect) {
         )),
         Line::from(""),
         Line::from(vec![
-            Span::styled("y", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "y",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" to confirm, any other key to cancel"),
         ]),
     ]);
@@ -525,12 +555,11 @@ pub fn render_help(frame: &mut Frame, area: Rect) {
     let help_area = Rect::new(x, y, width, height);
 
     frame.render_widget(Clear, help_area);
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Help — press ? to close ")
-                .style(Style::default().bg(Color::DarkGray)),
-        );
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Help — press ? to close ")
+            .style(Style::default().bg(Color::DarkGray)),
+    );
     frame.render_widget(list, help_area);
 }
