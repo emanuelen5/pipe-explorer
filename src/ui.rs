@@ -363,10 +363,11 @@ fn render_search_bar(frame: &mut Frame, app: &App, area: Rect) {
 
 /// Render the inline command editor overlay.
 fn render_editor_overlay(frame: &mut Frame, app: &App, area: Rect) {
-    let width = area.width.saturating_sub(4).min(80);
+    let height = 3u16;
+    let width = area.width.saturating_sub(4);
     let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + area.height / 2;
-    let dialog_area = Rect::new(x, y, width, 3);
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let dialog_area = Rect::new(x, y, width, height);
 
     frame.render_widget(Clear, dialog_area);
     let stage_num = app.pipeline.selected + 1;
@@ -408,10 +409,11 @@ fn render_editor_overlay(frame: &mut Frame, app: &App, area: Rect) {
 
 /// Render the save-to-file dialog overlay.
 fn render_save_overlay(frame: &mut Frame, app: &App, area: Rect) {
+    let height = 3u16;
     let width = area.width.saturating_sub(4).min(60);
     let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + area.height / 2;
-    let dialog_area = Rect::new(x, y, width, 3);
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let dialog_area = Rect::new(x, y, width, height);
 
     frame.render_widget(Clear, dialog_area);
     let block = Block::default()
@@ -452,10 +454,11 @@ fn render_save_overlay(frame: &mut Frame, app: &App, area: Rect) {
 fn render_confirm_delete_overlay(frame: &mut Frame, app: &App, area: Rect) {
     let stage_num = app.pipeline.selected + 1;
     let total = app.pipeline.len();
+    let height = 5u16;
     let width = area.width.saturating_sub(4).min(60);
     let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + area.height / 2;
-    let dialog_area = Rect::new(x, y, width, 5);
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let dialog_area = Rect::new(x, y, width, height);
 
     frame.render_widget(Clear, dialog_area);
     let block = Block::default()
