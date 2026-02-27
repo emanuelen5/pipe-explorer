@@ -1,6 +1,7 @@
 mod app;
 mod executor;
 mod pipeline;
+mod search;
 mod ui;
 
 use clap::Parser;

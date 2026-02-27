@@ -4,11 +4,11 @@ use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
 use futures::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
-use regex::RegexBuilder;
 use tokio::sync::mpsc;
 
 use crate::executor::{ExecutorCache, StageOutput, execute_pipeline_stages};
 use crate::pipeline::Pipeline;
+use crate::search::SearchState;
 use crate::ui;
 
 /// The display mode for stage output.
@@ -36,46 +36,6 @@ enum ExecMsg {
         outputs: Vec<StageOutput>,
         error: Option<String>,
     },
-}
-
-/// All state related to the incremental output search.
-#[derive(Debug, Default)]
-pub struct SearchState {
-    /// The current search query (may include \c/\C modifiers).
-    pub query: String,
-    /// Cursor position within the query (byte index).
-    pub cursor: usize,
-    /// All matches in the current output: (line_index, start_byte, end_byte).
-    pub matches: Vec<(usize, usize, usize)>,
-    /// Index of the currently highlighted match.
-    pub match_idx: usize,
-}
-
-impl SearchState {
-    /// Parse a Vim-style search query, extracting the regex pattern and case flag.
-    /// `\c` anywhere in the pattern → case-insensitive; `\C` → case-sensitive (default).
-    pub fn parse_vim_pattern(query: &str) -> (String, bool) {
-        let mut pattern = query.to_string();
-        let case_insensitive;
-        if pattern.contains("\\c") {
-            case_insensitive = true;
-            pattern = pattern.replace("\\c", "");
-        } else if pattern.contains("\\C") {
-            case_insensitive = false;
-            pattern = pattern.replace("\\C", "");
-        } else {
-            case_insensitive = false;
-        }
-        (pattern, case_insensitive)
-    }
-
-    /// Reset all search state.
-    pub fn clear(&mut self) {
-        self.query.clear();
-        self.cursor = 0;
-        self.matches.clear();
-        self.match_idx = 0;
-    }
 }
 
 /// Full application state.
@@ -239,28 +199,8 @@ impl App {
 
     /// (Re-)compute search matches for the current output. Resets match index to 0.
     pub fn compute_search_matches(&mut self) {
-        self.search.matches.clear();
-        self.search.match_idx = 0;
-        if self.search.query.is_empty() {
-            return;
-        }
-        let (pattern, case_insensitive) = SearchState::parse_vim_pattern(&self.search.query);
-        if pattern.is_empty() {
-            return;
-        }
-        let re = match RegexBuilder::new(&pattern)
-            .case_insensitive(case_insensitive)
-            .build()
-        {
-            Ok(r) => r,
-            Err(_) => return,
-        };
         let content = self.current_output_text();
-        for (line_idx, line) in content.lines().enumerate() {
-            for m in re.find_iter(line) {
-                self.search.matches.push((line_idx, m.start(), m.end()));
-            }
-        }
+        self.search.compute(&content);
     }
 
     /// Enter search mode, clearing any previous query.
