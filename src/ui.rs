@@ -175,7 +175,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             (
                 format!("NORMAL{}", running),
                 "[q]uit  [e/Enter]edit  [n]ew  [d]el  [Tab/←/→]switch  \
-                 [1]stdout  [2]stderr  [3]combined  [s]save  [r]rerun  \
+                 [1]stdout  [2]stderr  [3]combined  [s]ave  [r]erun  \
                  [j/k/PgDn/PgUp/gg/G]scroll",
             )
         }
