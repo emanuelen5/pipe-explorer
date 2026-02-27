@@ -106,4 +106,4 @@ Press `/` to open the search bar at the bottom of the screen. Type a regex patte
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+GPL-3.0 — see [LICENSE](LICENSE).
