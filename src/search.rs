@@ -14,6 +14,15 @@ pub struct SearchState {
 }
 
 impl SearchState {
+    /// A const empty search state for use as a static default.
+    pub const fn empty() -> Self {
+        Self {
+            query: String::new(),
+            cursor: 0,
+            matches: Vec::new(),
+            match_idx: 0,
+        }
+    }
     /// Parse a Vim-style search query, extracting the regex pattern and case flag.
     /// `\c` anywhere in the pattern → case-insensitive; `\C` → case-sensitive (default).
     pub fn parse_vim_pattern(query: &str) -> (String, bool) {

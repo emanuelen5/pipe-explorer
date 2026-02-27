@@ -19,6 +19,24 @@ pub enum OutputMode {
     Combined,
 }
 
+/// Per-stage view state (output mode, search, scroll position).
+#[derive(Debug)]
+pub struct StageViewState {
+    pub output_mode: OutputMode,
+    pub search: SearchState,
+    pub scroll: usize,
+}
+
+impl Default for StageViewState {
+    fn default() -> Self {
+        Self {
+            output_mode: OutputMode::Stdout,
+            search: SearchState::default(),
+            scroll: 0,
+        }
+    }
+}
+
 /// The current interaction mode of the application.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
@@ -42,11 +60,10 @@ enum ExecMsg {
 pub struct App {
     pub pipeline: Pipeline,
     pub mode: AppMode,
-    pub output_mode: OutputMode,
+    /// Per-stage view state (output mode, search, scroll).
+    pub stage_views: Vec<StageViewState>,
     /// Cached outputs per stage (only up to the currently selected stage).
     pub stage_outputs: Vec<StageOutput>,
-    /// Vertical scroll offset for the output pager.
-    pub scroll: usize,
     /// Error message to display (e.g. command failed).
     pub error_message: Option<String>,
     /// Is a command currently running in the background?
@@ -59,8 +76,6 @@ pub struct App {
     pub editor_scroll_x: usize,
     /// Show help overlay?
     pub show_help: bool,
-    /// Search state (query, cursor, matches, current match index).
-    pub search: SearchState,
     /// True while editing a freshly inserted stage (remove on cancel).
     pending_new_stage: bool,
     /// The executor cache.
@@ -126,19 +141,18 @@ impl App {
             }
         });
 
+        let stage_count = pipeline.len();
         Self {
             pipeline,
             mode: AppMode::Normal,
-            output_mode: OutputMode::Stdout,
+            stage_views: (0..stage_count).map(|_| StageViewState::default()).collect(),
             stage_outputs: Vec::new(),
-            scroll: 0,
             error_message: None,
             running: false,
             editor_content: String::new(),
             editor_cursor: 0,
             editor_scroll_x: 0,
             show_help: false,
-            search: SearchState::default(),
             pending_new_stage: false,
             cache: ExecutorCache::new(),
             exec_tx,
@@ -177,12 +191,36 @@ impl App {
                     self.stage_outputs = outputs;
                     self.error_message = None;
                 }
-                self.scroll = 0;
+                self.view_mut().scroll = 0;
                 self.compute_search_matches();
                 true
             }
             Err(_) => false,
         }
+    }
+
+    /// Get the current stage's view state (read-only).
+    pub fn view(&self) -> &StageViewState {
+        self.stage_views.get(self.pipeline.selected)
+            .unwrap_or_else(|| {
+                // Should not happen, but provide a safe fallback
+                static DEFAULT: StageViewState = StageViewState {
+                    output_mode: OutputMode::Stdout,
+                    search: SearchState::empty(),
+                    scroll: 0,
+                };
+                &DEFAULT
+            })
+    }
+
+    /// Get the current stage's view state (mutable).
+    pub fn view_mut(&mut self) -> &mut StageViewState {
+        let idx = self.pipeline.selected;
+        // Ensure vec is large enough
+        while self.stage_views.len() <= idx {
+            self.stage_views.push(StageViewState::default());
+        }
+        &mut self.stage_views[idx]
     }
 
     /// Return the text to display in the output pager.
@@ -192,7 +230,7 @@ impl App {
         }
         let idx = self.pipeline.selected.min(self.stage_outputs.len().saturating_sub(1));
         let out = &self.stage_outputs[idx];
-        match self.output_mode {
+        match self.view().output_mode {
             OutputMode::Stdout => out.stdout_str(),
             OutputMode::Stderr => out.stderr_str(),
             OutputMode::Combined => {
@@ -209,12 +247,14 @@ impl App {
     /// Scroll down by `n` lines.
     pub fn scroll_down(&mut self, n: usize) {
         let total = self.output_line_count();
-        self.scroll = (self.scroll + n).min(total.saturating_sub(1));
+        let scroll = &mut self.view_mut().scroll;
+        *scroll = (*scroll + n).min(total.saturating_sub(1));
     }
 
     /// Scroll up by `n` lines.
     pub fn scroll_up(&mut self, n: usize) {
-        self.scroll = self.scroll.saturating_sub(n);
+        let scroll = &mut self.view_mut().scroll;
+        *scroll = scroll.saturating_sub(n);
     }
 
     /// Save current output text to a file.
@@ -227,12 +267,12 @@ impl App {
     /// (Re-)compute search matches for the current output. Resets match index to 0.
     pub fn compute_search_matches(&mut self) {
         let content = self.current_output_text();
-        self.search.compute(&content);
+        self.view_mut().search.compute(&content);
     }
 
     /// Enter search mode, clearing any previous query.
     pub fn start_search(&mut self) {
-        self.search.clear();
+        self.view_mut().search.clear();
         self.mode = AppMode::Searching;
     }
 
@@ -241,39 +281,42 @@ impl App {
         self.compute_search_matches();
         self.mode = AppMode::Normal;
         // Scroll to the first match if any.
-        if let Some(&(line, _, _)) = self.search.matches.first() {
-            self.scroll = line;
+        let first_line = self.view().search.matches.first().map(|&(line, _, _)| line);
+        if let Some(line) = first_line {
+            self.view_mut().scroll = line;
         }
     }
 
     /// Cancel search and clear all highlights.
     pub fn cancel_search(&mut self) {
-        self.search.clear();
+        self.view_mut().search.clear();
         self.mode = AppMode::Normal;
     }
 
     /// Advance to the next search match.
     pub fn search_next(&mut self) {
-        if self.search.matches.is_empty() {
+        let view = self.view_mut();
+        if view.search.matches.is_empty() {
             return;
         }
-        self.search.match_idx = (self.search.match_idx + 1) % self.search.matches.len();
-        let (line, _, _) = self.search.matches[self.search.match_idx];
-        self.scroll = line;
+        view.search.match_idx = (view.search.match_idx + 1) % view.search.matches.len();
+        let (line, _, _) = view.search.matches[view.search.match_idx];
+        view.scroll = line;
     }
 
     /// Go back to the previous search match.
     pub fn search_prev(&mut self) {
-        if self.search.matches.is_empty() {
+        let view = self.view_mut();
+        if view.search.matches.is_empty() {
             return;
         }
-        if self.search.match_idx == 0 {
-            self.search.match_idx = self.search.matches.len() - 1;
+        if view.search.match_idx == 0 {
+            view.search.match_idx = view.search.matches.len() - 1;
         } else {
-            self.search.match_idx -= 1;
+            view.search.match_idx -= 1;
         }
-        let (line, _, _) = self.search.matches[self.search.match_idx];
-        self.scroll = line;
+        let (line, _, _) = view.search.matches[view.search.match_idx];
+        view.scroll = line;
     }
 
     /// Start editing the current stage's command.
@@ -305,7 +348,9 @@ impl App {
     /// Cancel editing.
     pub fn cancel_edit(&mut self) {
         if self.pending_new_stage {
+            let removed_idx = self.pipeline.selected;
             self.pipeline.remove_selected();
+            self.remove_stage_view(removed_idx);
             self.pending_new_stage = false;
         }
         self.mode = AppMode::Normal;
@@ -366,15 +411,11 @@ impl App {
             // Navigation between stages
             KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
                 self.pipeline.select_next();
-                self.scroll = 0;
                 self.trigger_exec(false);
-                self.compute_search_matches();
             }
             KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
                 self.pipeline.select_prev();
-                self.scroll = 0;
                 self.trigger_exec(false);
-                self.compute_search_matches();
             }
 
             // Editing
@@ -387,16 +428,18 @@ impl App {
             // Add new stage (also always available via 'a'; 'n' navigates when search is active)
             KeyCode::Char('a') => {
                 self.pipeline.insert_after_selected();
+                self.sync_stage_views();
                 self.start_editing();
                 self.pending_new_stage = true;
             }
 
             // 'n': add new stage when no search is active; next match when search is active
             KeyCode::Char('n') => {
-                if !self.search.matches.is_empty() {
+                if !self.view().search.matches.is_empty() {
                     self.search_next();
                 } else {
                     self.pipeline.insert_after_selected();
+                    self.sync_stage_views();
                     self.start_editing();
                     self.pending_new_stage = true;
                 }
@@ -404,7 +447,7 @@ impl App {
 
             // Navigate to previous search match
             KeyCode::Char('p') => {
-                if !self.search.matches.is_empty() {
+                if !self.view().search.matches.is_empty() {
                     self.search_prev();
                 }
             }
@@ -415,8 +458,9 @@ impl App {
                     let is_last = self.pipeline.selected == self.pipeline.len() - 1;
                     if is_last || self.pipeline.len() == 1 {
                         // Last stage or only stage: delete immediately
+                        let removed_idx = self.pipeline.selected;
                         self.pipeline.remove_selected();
-                        self.scroll = 0;
+                        self.remove_stage_view(removed_idx);
                         if !self.pipeline.is_empty() {
                             self.trigger_exec(false);
                         } else {
@@ -441,18 +485,18 @@ impl App {
 
             // Output mode
             KeyCode::Char('1') => {
-                self.output_mode = OutputMode::Stdout;
-                self.scroll = 0;
+                self.view_mut().output_mode = OutputMode::Stdout;
+                self.view_mut().scroll = 0;
                 self.compute_search_matches();
             }
             KeyCode::Char('2') => {
-                self.output_mode = OutputMode::Stderr;
-                self.scroll = 0;
+                self.view_mut().output_mode = OutputMode::Stderr;
+                self.view_mut().scroll = 0;
                 self.compute_search_matches();
             }
             KeyCode::Char('3') => {
-                self.output_mode = OutputMode::Combined;
-                self.scroll = 0;
+                self.view_mut().output_mode = OutputMode::Combined;
+                self.view_mut().scroll = 0;
                 self.compute_search_matches();
             }
 
@@ -472,11 +516,11 @@ impl App {
             }
             KeyCode::PageUp => self.scroll_up(20),
             KeyCode::Char('g') | KeyCode::Home => {
-                self.scroll = 0;
+                self.view_mut().scroll = 0;
             }
             KeyCode::Char('G') | KeyCode::End => {
                 let total = self.output_line_count();
-                self.scroll = total.saturating_sub(1);
+                self.view_mut().scroll = total.saturating_sub(1);
             }
 
             // Search
@@ -558,8 +602,9 @@ impl App {
     fn handle_confirm_delete_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
+                let removed_idx = self.pipeline.selected;
                 self.pipeline.remove_selected();
-                self.scroll = 0;
+                self.remove_stage_view(removed_idx);
                 self.mode = AppMode::Normal;
                 if !self.pipeline.is_empty() {
                     self.trigger_exec(false);
@@ -581,21 +626,24 @@ impl App {
             KeyCode::Esc => self.cancel_search(),
             KeyCode::Enter => self.confirm_search(),
             KeyCode::Backspace => {
-                if self.search.cursor > 0 {
-                    let pos = self.search.cursor - 1;
-                    self.search.query.remove(pos);
-                    self.search.cursor = pos;
+                let view = self.view_mut();
+                if view.search.cursor > 0 {
+                    let pos = view.search.cursor - 1;
+                    view.search.query.remove(pos);
+                    view.search.cursor = pos;
                 }
             }
             KeyCode::Delete => {
-                if self.search.cursor < self.search.query.len() {
-                    self.search.query.remove(self.search.cursor);
+                let view = self.view_mut();
+                if view.search.cursor < view.search.query.len() {
+                    view.search.query.remove(view.search.cursor);
                 }
             }
             KeyCode::Left => {
-                if self.search.cursor > 0 {
-                    let s = &self.search.query[..self.search.cursor];
-                    self.search.cursor = s
+                let view = self.view_mut();
+                if view.search.cursor > 0 {
+                    let s = &view.search.query[..view.search.cursor];
+                    view.search.cursor = s
                         .char_indices()
                         .last()
                         .map(|(i, _)| i)
@@ -603,29 +651,47 @@ impl App {
                 }
             }
             KeyCode::Right => {
-                if self.search.cursor < self.search.query.len() {
-                    let s = &self.search.query[self.search.cursor..];
-                    let next = s
+                let view = self.view_mut();
+                if view.search.cursor < view.search.query.len() {
+                    let s_len = view.search.query.len();
+                    let cursor = view.search.cursor;
+                    let next = view.search.query[cursor..]
                         .char_indices()
                         .nth(1)
-                        .map(|(i, _)| self.search.cursor + i)
-                        .unwrap_or(self.search.query.len());
-                    self.search.cursor = next;
+                        .map(|(i, _)| cursor + i)
+                        .unwrap_or(s_len);
+                    view.search.cursor = next;
                 }
             }
             KeyCode::Home => {
-                self.search.cursor = 0;
+                self.view_mut().search.cursor = 0;
             }
             KeyCode::End => {
-                self.search.cursor = self.search.query.len();
+                let len = self.view().search.query.len();
+                self.view_mut().search.cursor = len;
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.search.query.insert(self.search.cursor, c);
-                self.search.cursor += c.len_utf8();
+                let view = self.view_mut();
+                view.search.query.insert(view.search.cursor, c);
+                view.search.cursor += c.len_utf8();
             }
             _ => {}
         }
         false
+    }
+
+    /// Ensure stage_views has an entry for every pipeline stage.
+    fn sync_stage_views(&mut self) {
+        while self.stage_views.len() < self.pipeline.len() {
+            self.stage_views.push(StageViewState::default());
+        }
+    }
+
+    /// Remove a stage view at the given index.
+    fn remove_stage_view(&mut self, idx: usize) {
+        if idx < self.stage_views.len() {
+            self.stage_views.remove(idx);
+        }
     }
 
     /// Handle a terminal event. Returns `true` if the app should quit.

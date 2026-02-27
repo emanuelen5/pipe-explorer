@@ -83,7 +83,8 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
             .map(|o| o.stderr_str().lines().count())
             .unwrap_or(0);
 
-        let line_count_label = match app.output_mode {
+        let stage_view = app.stage_views.get(i);
+        let line_count_label = match stage_view.map(|v| v.output_mode).unwrap_or(OutputMode::Stdout) {
             OutputMode::Stdout => format!("{}/[{}]", stdout_count, stderr_count),
             OutputMode::Stderr => format!("[{}]/{}", stdout_count, stderr_count),
             OutputMode::Combined => format!(
@@ -186,21 +187,23 @@ fn render_output(frame: &mut Frame, app: &App, area: Rect) {
         String::new()
     };
 
-    let mode_label = match app.output_mode {
+    let view = app.view();
+
+    let mode_label = match view.output_mode {
         OutputMode::Stdout => "stdout",
         OutputMode::Stderr => "stderr",
         OutputMode::Combined => "combined",
     };
 
     // Include search match count when a search is active.
-    let search_info = if !app.search.query.is_empty() {
-        if app.search.matches.is_empty() {
+    let search_info = if !view.search.query.is_empty() {
+        if view.search.matches.is_empty() {
             " [no matches]".to_string()
         } else {
             format!(
                 " [{}/{}]",
-                app.search.match_idx + 1,
-                app.search.matches.len()
+                view.search.match_idx + 1,
+                view.search.matches.len()
             )
         }
     } else {
@@ -240,12 +243,12 @@ fn render_output(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     // Build a lookup: line_index → list of (start, end, is_current)
-    let has_matches = !app.search.matches.is_empty();
+    let has_matches = !view.search.matches.is_empty();
     let mut line_match_map: std::collections::HashMap<usize, Vec<(usize, usize, bool)>> =
         std::collections::HashMap::new();
     if has_matches {
-        for (idx, &(line, start, end)) in app.search.matches.iter().enumerate() {
-            let is_current = idx == app.search.match_idx;
+        for (idx, &(line, start, end)) in view.search.matches.iter().enumerate() {
+            let is_current = idx == view.search.match_idx;
             line_match_map
                 .entry(line)
                 .or_default()
@@ -267,7 +270,7 @@ fn render_output(frame: &mut Frame, app: &App, area: Rect) {
 
     let total_lines = lines.len();
     let visible_height = inner.height as usize;
-    let scroll = app.scroll.min(total_lines.saturating_sub(visible_height));
+    let scroll = view.scroll.min(total_lines.saturating_sub(visible_height));
 
     let text = Text::from(lines);
     let para = Paragraph::new(text)
@@ -308,7 +311,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         _ => {}
     }
 
-    let search_nav_hint = if !app.search.matches.is_empty() {
+    let search_nav_hint = if !app.view().search.matches.is_empty() {
         "  [n]ext-match  [p]rev-match  [Esc]clear-search"
     } else {
         ""
@@ -357,8 +360,9 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 
 /// Render the vim-style search bar (shown in place of the status bar when searching).
 fn render_search_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let cursor_pos = app.search.cursor;
-    let content = &app.search.query;
+    let view = app.view();
+    let cursor_pos = view.search.cursor;
+    let content = &view.search.query;
 
     let prefix = Span::styled(
         "/",
