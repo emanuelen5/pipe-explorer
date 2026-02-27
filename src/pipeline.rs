@@ -23,7 +23,10 @@ pub struct Pipeline {
 
 impl Pipeline {
     pub fn new(stages: Vec<PipeStage>) -> Self {
-        Self { stages, selected: 0 }
+        Self {
+            stages,
+            selected: 0,
+        }
     }
 
     pub fn is_empty(&self) -> bool {

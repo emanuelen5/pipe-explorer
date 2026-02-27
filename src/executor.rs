@@ -42,12 +42,7 @@ impl ExecutorCache {
 
     /// Run a shell command with the given stdin bytes.
     /// Returns a cached result if available; otherwise executes and caches.
-    pub fn run(
-        &mut self,
-        command: &str,
-        stdin: &[u8],
-        force: bool,
-    ) -> anyhow::Result<StageOutput> {
+    pub fn run(&mut self, command: &str, stdin: &[u8], force: bool) -> anyhow::Result<StageOutput> {
         let key = CacheKey {
             command: command.to_string(),
             stdin_hash: sha256(stdin),
@@ -178,10 +173,7 @@ mod tests {
     #[test]
     fn test_execute_pipeline_stages() {
         let mut cache = ExecutorCache::new();
-        let commands = vec![
-            "echo hello world".to_string(),
-            "wc -w".to_string(),
-        ];
+        let commands = vec!["echo hello world".to_string(), "wc -w".to_string()];
         let outputs = execute_pipeline_stages(&mut cache, &commands, 1, false).unwrap();
         assert_eq!(outputs.len(), 2);
         let word_count: u32 = outputs[1].stdout_str().trim().parse().unwrap();

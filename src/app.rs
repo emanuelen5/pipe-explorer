@@ -122,16 +122,18 @@ impl App {
             let mut cache = ExecutorCache::new();
             while let Some((commands, up_to, force)) = inner_rx.recv().await {
                 let mut c = cache;
-                let (result, returned_cache) =
-                    tokio::task::spawn_blocking(move || {
-                        let r = execute_pipeline_stages(&mut c, &commands, up_to, force);
-                        (r, c)
-                    })
-                    .await
-                    .expect("executor task panicked");
+                let (result, returned_cache) = tokio::task::spawn_blocking(move || {
+                    let r = execute_pipeline_stages(&mut c, &commands, up_to, force);
+                    (r, c)
+                })
+                .await
+                .expect("executor task panicked");
                 cache = returned_cache;
                 let msg = match result {
-                    Ok(outputs) => ExecMsg::Done { outputs, error: None },
+                    Ok(outputs) => ExecMsg::Done {
+                        outputs,
+                        error: None,
+                    },
                     Err(e) => ExecMsg::Done {
                         outputs: vec![],
                         error: Some(e.to_string()),
@@ -145,7 +147,9 @@ impl App {
         Self {
             pipeline,
             mode: AppMode::Normal,
-            stage_views: (0..stage_count).map(|_| StageViewState::default()).collect(),
+            stage_views: (0..stage_count)
+                .map(|_| StageViewState::default())
+                .collect(),
             stage_outputs: Vec::new(),
             error_message: None,
             running: false,
@@ -201,7 +205,8 @@ impl App {
 
     /// Get the current stage's view state (read-only).
     pub fn view(&self) -> &StageViewState {
-        self.stage_views.get(self.pipeline.selected)
+        self.stage_views
+            .get(self.pipeline.selected)
             .unwrap_or_else(|| {
                 // Should not happen, but provide a safe fallback
                 static DEFAULT: StageViewState = StageViewState {
@@ -228,7 +233,10 @@ impl App {
         if self.pipeline.is_empty() || self.stage_outputs.is_empty() {
             return String::new();
         }
-        let idx = self.pipeline.selected.min(self.stage_outputs.len().saturating_sub(1));
+        let idx = self
+            .pipeline
+            .selected
+            .min(self.stage_outputs.len().saturating_sub(1));
         let out = &self.stage_outputs[idx];
         match self.view().output_mode {
             OutputMode::Stdout => out.stdout_str(),
@@ -568,17 +576,16 @@ impl App {
                 if self.editor_cursor > 0 {
                     // Move back by one char boundary
                     let s = &self.editor_content[..self.editor_cursor];
-                    self.editor_cursor = s
-                        .char_indices()
-                        .last()
-                        .map(|(i, _)| i)
-                        .unwrap_or(0);
+                    self.editor_cursor = s.char_indices().last().map(|(i, _)| i).unwrap_or(0);
                 }
             }
             KeyCode::Right => {
                 if self.editor_cursor < self.editor_content.len() {
                     let s = &self.editor_content[self.editor_cursor..];
-                    let next = s.char_indices().nth(1).map(|(i, _)| self.editor_cursor + i)
+                    let next = s
+                        .char_indices()
+                        .nth(1)
+                        .map(|(i, _)| self.editor_cursor + i)
                         .unwrap_or(self.editor_content.len());
                     self.editor_cursor = next;
                 }
@@ -643,11 +650,7 @@ impl App {
                 let view = self.view_mut();
                 if view.search.cursor > 0 {
                     let s = &view.search.query[..view.search.cursor];
-                    view.search.cursor = s
-                        .char_indices()
-                        .last()
-                        .map(|(i, _)| i)
-                        .unwrap_or(0);
+                    view.search.cursor = s.char_indices().last().map(|(i, _)| i).unwrap_or(0);
                 }
             }
             KeyCode::Right => {

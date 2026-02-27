@@ -84,7 +84,10 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
             .unwrap_or(0);
 
         let stage_view = app.stage_views.get(i);
-        let line_count_label = match stage_view.map(|v| v.output_mode).unwrap_or(OutputMode::Stdout) {
+        let line_count_label = match stage_view
+            .map(|v| v.output_mode)
+            .unwrap_or(OutputMode::Stdout)
+        {
             OutputMode::Stdout => format!("{}/[{}]", stdout_count, stderr_count),
             OutputMode::Stderr => format!("[{}]/{}", stdout_count, stderr_count),
             OutputMode::Combined => format!(
