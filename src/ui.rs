@@ -80,6 +80,49 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+/// Build a single output `Line` with search-match spans applied.
+///
+/// `line_matches` is a sorted slice of `(start_byte, end_byte, is_current_match)`.
+fn build_highlighted_line(text: &str, line_matches: &[(usize, usize, bool)]) -> Line<'static> {
+    if line_matches.is_empty() {
+        return Line::from(Span::raw(text.to_owned()));
+    }
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut pos = 0usize;
+
+    for &(start, end, is_current) in line_matches {
+        // Clamp to valid byte boundaries
+        let start = start.min(text.len());
+        let end = end.min(text.len());
+        if start > end {
+            continue;
+        }
+        // Text before this match
+        if pos < start {
+            spans.push(Span::raw(text[pos..start].to_owned()));
+        }
+        // The match itself
+        let style = if is_current {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Black).bg(Color::Rgb(180, 140, 30))
+        };
+        spans.push(Span::styled(text[start..end].to_owned(), style));
+        pos = end;
+    }
+
+    // Remaining text after all matches
+    if pos < text.len() {
+        spans.push(Span::raw(text[pos..].to_owned()));
+    }
+
+    Line::from(spans)
+}
+
 /// Render the output pager area.
 fn render_output(frame: &mut Frame, app: &App, area: Rect) {
     let exit_info = if !app.stage_outputs.is_empty() {
@@ -98,11 +141,28 @@ fn render_output(frame: &mut Frame, app: &App, area: Rect) {
         OutputMode::Stderr => "stderr",
         OutputMode::Combined => "combined",
     };
+
+    // Include search match count when a search is active.
+    let search_info = if !app.search.query.is_empty() {
+        if app.search.matches.is_empty() {
+            " [no matches]".to_string()
+        } else {
+            format!(
+                " [{}/{}]",
+                app.search.match_idx + 1,
+                app.search.matches.len()
+            )
+        }
+    } else {
+        String::new()
+    };
+
     let title = format!(
-        " Output ({}) — Stage {}{} ",
+        " Output ({}) — Stage {}{}{} ",
         mode_label,
         app.pipeline.selected + 1,
         exit_info,
+        search_info,
     );
 
     let block = Block::default().borders(Borders::ALL).title(title);
@@ -129,16 +189,36 @@ fn render_output(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
+    // Build a lookup: line_index → list of (start, end, is_current)
+    let has_matches = !app.search.matches.is_empty();
+    let mut line_match_map: std::collections::HashMap<usize, Vec<(usize, usize, bool)>> =
+        std::collections::HashMap::new();
+    if has_matches {
+        for (idx, &(line, start, end)) in app.search.matches.iter().enumerate() {
+            let is_current = idx == app.search.match_idx;
+            line_match_map
+                .entry(line)
+                .or_default()
+                .push((start, end, is_current));
+        }
+    }
+
     let lines: Vec<Line> = content
         .lines()
-        .map(|l| Line::from(Span::raw(l.to_owned())))
+        .enumerate()
+        .map(|(line_idx, l)| {
+            if let Some(matches) = line_match_map.get(&line_idx) {
+                build_highlighted_line(l, matches)
+            } else {
+                Line::from(Span::raw(l.to_owned()))
+            }
+        })
         .collect();
 
     let total_lines = lines.len();
     let visible_height = inner.height as usize;
     let scroll = app.scroll.min(total_lines.saturating_sub(visible_height));
 
-    // Show scroll indicator in title if needed
     let text = Text::from(lines);
     let para = Paragraph::new(text)
         .scroll((scroll as u16, 0))
@@ -170,19 +250,41 @@ fn render_output(frame: &mut Frame, app: &App, area: Rect) {
 
 /// Render the status bar at the bottom.
 fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
+    match app.mode {
+        AppMode::Searching => {
+            // Show the search prompt like Vim: /query_with_cursor
+            render_search_bar(frame, app, area);
+            return;
+        }
+        _ => {}
+    }
+
+    let search_nav_hint = if !app.search.matches.is_empty() {
+        "  [n]ext-match  [p]rev-match  [Esc]clear-search"
+    } else {
+        ""
+    };
+
     let (mode_str, hints) = match app.mode {
         AppMode::Normal => {
             let running = if app.running { " ⟳ Running…" } else { "" };
             (
                 format!("NORMAL{}", running),
-                "[q]uit  [e/Enter]edit  [n]ew  [d]el  [Tab/←/→]switch  \
-                 [1]stdout  [2]stderr  [3]combined  [s]ave  [r]erun  \
-                 [j/k/PgDn/PgUp/gg/G]scroll",
+                format!(
+                    "[q]uit  [e/Enter]edit  [a]new  [d]el  [Tab/←/→]switch  \
+                     [1]stdout  [2]stderr  [3]combined  [s]ave  [r]erun  \
+                     [/]search  [j/k/PgDn/PgUp/gg/G]scroll{}",
+                    search_nav_hint
+                ),
             )
         }
-        AppMode::Editing => ("EDIT".to_string(), "[Enter]confirm  [Esc]cancel"),
-        AppMode::Saving => ("SAVE".to_string(), "[Enter]confirm  [Esc]cancel"),
-        AppMode::ConfirmingDelete => ("DELETE?".to_string(), "[y]confirm delete  [any]cancel"),
+        AppMode::Editing => ("EDIT".to_string(), "[Enter]confirm  [Esc]cancel".to_string()),
+        AppMode::Saving => ("SAVE".to_string(), "[Enter]confirm  [Esc]cancel".to_string()),
+        AppMode::ConfirmingDelete => (
+            "DELETE?".to_string(),
+            "[y]confirm delete  [any]cancel".to_string(),
+        ),
+        AppMode::Searching => unreachable!(),
     };
 
     let left = Span::styled(
@@ -199,6 +301,43 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 
     let status = Paragraph::new(Line::from(vec![left, Span::raw("  "), right]));
     frame.render_widget(status, area);
+}
+
+/// Render the vim-style search bar (shown in place of the status bar when searching).
+fn render_search_bar(frame: &mut Frame, app: &App, area: Rect) {
+    let cursor_pos = app.search.cursor;
+    let content = &app.search.query;
+
+    let prefix = Span::styled("/", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+
+    let cursor_spans = if cursor_pos < content.len() {
+        let (before, after) = content.split_at(cursor_pos);
+        let mut chars = after.chars();
+        let cur_ch = chars.next().unwrap_or(' ');
+        let rest: String = chars.collect();
+        vec![
+            Span::raw(before.to_owned()),
+            Span::styled(
+                cur_ch.to_string(),
+                Style::default().fg(Color::Black).bg(Color::White),
+            ),
+            Span::raw(rest),
+        ]
+    } else {
+        vec![
+            Span::raw(content.clone()),
+            Span::styled(" ", Style::default().fg(Color::Black).bg(Color::White)),
+        ]
+    };
+
+    let mut spans = vec![prefix];
+    spans.extend(cursor_spans);
+    spans.push(Span::styled(
+        "  [Enter]search  [Esc]cancel",
+        Style::default().fg(Color::DarkGray),
+    ));
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 /// Render the inline command editor overlay.
@@ -325,13 +464,16 @@ pub fn render_help(frame: &mut Frame, area: Rect) {
         ListItem::new("Tab / → / l    Next stage"),
         ListItem::new("Shift+Tab / ← / h  Previous stage"),
         ListItem::new("e / Enter      Edit current stage command"),
-        ListItem::new("n / a          Add new stage after current"),
+        ListItem::new("a / n          Add new stage (n only when no search active)"),
         ListItem::new("d              Delete current stage"),
         ListItem::new("r              Re-run (bypass cache)"),
         ListItem::new("s              Save output to file"),
         ListItem::new("1              Show stdout"),
         ListItem::new("2              Show stderr"),
         ListItem::new("3              Show combined (stdout+stderr)"),
+        ListItem::new("/              Start search (regex, \\c=ignore case, \\C=match case)"),
+        ListItem::new("n / p          Next / previous search match"),
+        ListItem::new("Esc            Clear search highlights"),
         ListItem::new("j / ↓          Scroll down"),
         ListItem::new("k / ↑          Scroll up"),
         ListItem::new("PgDn / Ctrl+f  Page down"),
