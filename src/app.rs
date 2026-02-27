@@ -419,11 +419,19 @@ impl App {
             // Navigation between stages
             KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
                 self.pipeline.select_next();
-                self.trigger_exec(false);
+                // Only trigger execution if this stage's output isn't already cached.
+                if self.pipeline.selected >= self.stage_outputs.len() {
+                    self.trigger_exec(false);
+                }
+                self.compute_search_matches();
             }
             KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
                 self.pipeline.select_prev();
-                self.trigger_exec(false);
+                // Only trigger execution if this stage's output isn't already cached.
+                if self.pipeline.selected >= self.stage_outputs.len() {
+                    self.trigger_exec(false);
+                }
+                self.compute_search_matches();
             }
 
             // Editing
@@ -830,7 +838,31 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Re
 
 #[cfg(test)]
 mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
     use super::*;
+    use crate::executor::StageOutput;
+    use crate::pipeline::parse_pipeline;
+
+    fn make_key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn make_stage_output(stdout: &str) -> StageOutput {
+        StageOutput {
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: vec![],
+            exit_code: Some(0),
+        }
+    }
+
+    fn make_error_stage_output(exit_code: i32) -> StageOutput {
+        StageOutput {
+            stdout: vec![],
+            stderr: b"error".to_vec(),
+            exit_code: Some(exit_code),
+        }
+    }
 
     #[test]
     fn test_editor_scroll_cursor_in_view() {
@@ -860,5 +892,92 @@ mod tests {
     fn test_editor_scroll_zero_inner_width() {
         // Should return current scroll unchanged (no-op).
         assert_eq!(compute_editor_scroll(0, "hello", 0), 0);
+    }
+
+    /// Navigate left preserves all stage_outputs (no exec triggered).
+    #[tokio::test]
+    async fn test_navigate_left_preserves_stage_outputs() {
+        let pipeline = parse_pipeline("echo a | echo b | echo c");
+        let mut app = App::new(pipeline);
+
+        // Simulate all three stages having been executed already.
+        app.stage_outputs = vec![
+            make_stage_output("a\n"),
+            make_stage_output("b\n"),
+            make_stage_output("c\n"),
+        ];
+        app.pipeline.selected = 2; // currently on stage 3
+
+        // Navigate left twice.
+        app.handle_event(make_key(KeyCode::Left));
+        app.handle_event(make_key(KeyCode::Left));
+
+        assert_eq!(app.pipeline.selected, 0);
+        // All three stage outputs must still be present.
+        assert_eq!(app.stage_outputs.len(), 3);
+        // No background execution should have been triggered.
+        assert!(!app.running);
+    }
+
+    /// Navigate right to an already-computed stage preserves all stage_outputs.
+    #[tokio::test]
+    async fn test_navigate_right_to_cached_stage_preserves_outputs() {
+        let pipeline = parse_pipeline("echo a | echo b | echo c");
+        let mut app = App::new(pipeline);
+
+        app.stage_outputs = vec![
+            make_stage_output("a\n"),
+            make_stage_output("b\n"),
+            make_stage_output("c\n"),
+        ];
+        app.pipeline.selected = 0;
+
+        // Navigate right to stage 1 (already cached).
+        app.handle_event(make_key(KeyCode::Right));
+
+        assert_eq!(app.pipeline.selected, 1);
+        assert_eq!(app.stage_outputs.len(), 3);
+        assert!(!app.running);
+    }
+
+    /// Navigate right to a new (uncached) stage triggers execution.
+    #[tokio::test]
+    async fn test_navigate_right_to_new_stage_triggers_exec() {
+        let pipeline = parse_pipeline("echo a | echo b | echo c");
+        let mut app = App::new(pipeline);
+
+        // Only stage 0 has been computed.
+        app.stage_outputs = vec![make_stage_output("a\n")];
+        app.pipeline.selected = 0;
+
+        // Navigate right to stage 1 (not yet cached).
+        app.handle_event(make_key(KeyCode::Right));
+
+        assert_eq!(app.pipeline.selected, 1);
+        // Execution should have been triggered.
+        assert!(app.running);
+    }
+
+    /// Error status of downstream stages is preserved when navigating left.
+    #[tokio::test]
+    async fn test_error_status_preserved_after_navigate_left() {
+        let pipeline = parse_pipeline("echo a | false | echo c");
+        let mut app = App::new(pipeline);
+
+        app.stage_outputs = vec![
+            make_stage_output("a\n"),
+            make_error_stage_output(1),
+            make_stage_output("c\n"),
+        ];
+        app.pipeline.selected = 2;
+
+        // Navigate back to stage 0.
+        app.handle_event(make_key(KeyCode::Left));
+        app.handle_event(make_key(KeyCode::Left));
+
+        assert_eq!(app.pipeline.selected, 0);
+        // Error exit code of stage 1 must be preserved.
+        assert_eq!(app.stage_outputs[1].exit_code, Some(1));
+        assert_eq!(app.stage_outputs.len(), 3);
     }
 }
