@@ -24,6 +24,7 @@ pub enum AppMode {
     Normal,
     Editing,
     Saving,
+    ConfirmingDelete,
 }
 
 /// Messages sent from the background executor task to the main event loop.
@@ -286,12 +287,21 @@ impl App {
 
             // Delete stage
             KeyCode::Char('d') => {
-                self.pipeline.remove_selected();
-                self.scroll = 0;
                 if !self.pipeline.is_empty() {
-                    self.trigger_exec(false);
-                } else {
-                    self.stage_outputs.clear();
+                    let is_last = self.pipeline.selected == self.pipeline.len() - 1;
+                    if is_last || self.pipeline.len() == 1 {
+                        // Last stage or only stage: delete immediately
+                        self.pipeline.remove_selected();
+                        self.scroll = 0;
+                        if !self.pipeline.is_empty() {
+                            self.trigger_exec(false);
+                        } else {
+                            self.stage_outputs.clear();
+                        }
+                    } else {
+                        // Not at the end: show confirmation prompt
+                        self.mode = AppMode::ConfirmingDelete;
+                    }
                 }
             }
 
@@ -407,6 +417,27 @@ impl App {
         false
     }
 
+    /// Handle a key event in the delete confirmation prompt.
+    fn handle_confirm_delete_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                self.pipeline.remove_selected();
+                self.scroll = 0;
+                self.mode = AppMode::Normal;
+                if !self.pipeline.is_empty() {
+                    self.trigger_exec(false);
+                } else {
+                    self.stage_outputs.clear();
+                }
+            }
+            _ => {
+                // Any other key cancels the delete
+                self.mode = AppMode::Normal;
+            }
+        }
+        false
+    }
+
     /// Handle a terminal event. Returns `true` if the app should quit.
     pub fn handle_event(&mut self, event: Event) -> bool {
         // Close help on any key
@@ -419,6 +450,7 @@ impl App {
             Event::Key(key) => match self.mode {
                 AppMode::Normal => self.handle_normal_key(key),
                 AppMode::Editing | AppMode::Saving => self.handle_editor_key(key),
+                AppMode::ConfirmingDelete => self.handle_confirm_delete_key(key),
             },
             _ => false,
         }

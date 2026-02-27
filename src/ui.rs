@@ -30,6 +30,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     match app.mode {
         AppMode::Editing => render_editor_overlay(frame, app, area),
         AppMode::Saving => render_save_overlay(frame, app, area),
+        AppMode::ConfirmingDelete => render_confirm_delete_overlay(frame, app, area),
         _ => {}
     }
 }
@@ -181,6 +182,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         }
         AppMode::Editing => ("EDIT".to_string(), "[Enter]confirm  [Esc]cancel"),
         AppMode::Saving => ("SAVE".to_string(), "[Enter]confirm  [Esc]cancel"),
+        AppMode::ConfirmingDelete => ("DELETE?".to_string(), "[y]confirm delete  [any]cancel"),
     };
 
     let left = Span::styled(
@@ -283,6 +285,37 @@ fn render_save_overlay(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let para = Paragraph::new(Line::from(display)).block(block);
+    frame.render_widget(para, dialog_area);
+}
+
+/// Render the delete confirmation overlay.
+fn render_confirm_delete_overlay(frame: &mut Frame, app: &App, area: Rect) {
+    let stage_num = app.pipeline.selected + 1;
+    let total = app.pipeline.len();
+    let width = area.width.saturating_sub(4).min(60);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + area.height / 2;
+    let dialog_area = Rect::new(x, y, width, 5);
+
+    frame.render_widget(Clear, dialog_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" ⚠ Confirm Delete ")
+        .style(Style::default().bg(Color::DarkGray).fg(Color::Yellow));
+
+    let text = Text::from(vec![
+        Line::from(format!(
+            "Deleting stage {} of {} may break downstream stages.",
+            stage_num, total
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("y", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::raw(" to confirm, any other key to cancel"),
+        ]),
+    ]);
+
+    let para = Paragraph::new(text).block(block).wrap(Wrap { trim: false });
     frame.render_widget(para, dialog_area);
 }
 
