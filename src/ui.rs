@@ -55,15 +55,36 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
 
     for (i, stage) in app.pipeline.stages.iter().enumerate() {
         let is_selected = i == app.pipeline.selected;
-        let title = format!(" Stage {} ", i + 1);
-        let style = if is_selected {
+
+        // Determine if this stage exited with an error.
+        let exit_code = app
+            .stage_outputs
+            .get(i)
+            .and_then(|o| o.exit_code);
+        let is_error = matches!(exit_code, Some(code) if code != 0);
+
+        let title = if is_error {
+            format!(" Stage {} ✗ ", i + 1)
+        } else {
+            format!(" Stage {} ", i + 1)
+        };
+
+        let style = if is_selected && is_error {
             Style::default()
-                .fg(Color::Black)
+                .fg(Color::White)
+                .bg(Color::Red)
+                .add_modifier(Modifier::BOLD)
+        } else if is_selected {
+            Style::default()
+                .fg(Color::White)
                 .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD)
+        } else if is_error {
+            Style::default().fg(Color::Red)
         } else {
             Style::default().fg(Color::White)
         };
+
         let cmd_display = if stage.command.is_empty() {
             "<empty>".to_string()
         } else {
