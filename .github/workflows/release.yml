@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            archive: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl-tools (Linux only)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get install -y musl-tools
+
+      - name: Cache Cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-cargo-
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package binary (Unix)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          ASSET_NAME="pipe-explorer-${{ matrix.target }}"
+          mkdir -p "$ASSET_NAME"
+          cp "target/${{ matrix.target }}/release/pipe-explorer" "$ASSET_NAME/"
+          cp README.md LICENSE "$ASSET_NAME/"
+          tar -czf "${ASSET_NAME}.tar.gz" "$ASSET_NAME"
+          echo "ASSET=${ASSET_NAME}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Package binary (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $AssetName = "pipe-explorer-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path $AssetName | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\pipe-explorer.exe" "$AssetName\"
+          Copy-Item README.md, LICENSE "$AssetName\"
+          Compress-Archive -Path "$AssetName" -DestinationPath "${AssetName}.zip"
+          "ASSET=${AssetName}.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET }}
