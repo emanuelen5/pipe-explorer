@@ -729,6 +729,18 @@ fn editor_inner_width(terminal_width: u16, dialog_max_width: u16) -> usize {
 pub async fn run(mut app: App) -> Result<()> {
     let mut terminal = setup_terminal()?;
 
+    // Ensure terminal is always restored, even on error or panic.
+    let result = run_inner(&mut app, &mut terminal).await;
+
+    // Restore terminal unconditionally before propagating any error.
+    restore_terminal(&mut terminal)?;
+    result
+}
+
+async fn run_inner(
+    app: &mut App,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> Result<()> {
     // Trigger initial execution if there are stages
     if !app.pipeline.is_empty() {
         app.trigger_exec(false);
@@ -755,7 +767,7 @@ pub async fn run(mut app: App) -> Result<()> {
 
         // Draw the UI
         terminal.draw(|frame| {
-            ui::render(frame, &app);
+            ui::render(frame, app);
             if app.show_help {
                 ui::render_help(frame, frame.area());
             }
@@ -784,7 +796,7 @@ pub async fn run(mut app: App) -> Result<()> {
         // If execution completed, redraw
         if exec_done {
             terminal.draw(|frame| {
-                ui::render(frame, &app);
+                ui::render(frame, app);
                 if app.show_help {
                     ui::render_help(frame, frame.area());
                 }
@@ -792,7 +804,6 @@ pub async fn run(mut app: App) -> Result<()> {
         }
     }
 
-    restore_terminal(&mut terminal)?;
     Ok(())
 }
 
