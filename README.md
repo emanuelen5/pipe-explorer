@@ -24,6 +24,7 @@ Instead of running a long pipe command and only seeing the final output, pipe-ex
 - **Smart caching** — unchanged upstream stages are not re-run; only affected stages are re-executed
 - **Scrollable output** — vim-style navigation (`j`/`k`, `PgDn`/`PgUp`, `g`/`G`)
 - **Save to file** — write the currently viewed output to disk with `s`
+- **Incremental search** — press `/` to search the output with a regex; jump between matches with `n` / `p`
 - **Help overlay** — press `?` to show all keybindings at any time
 
 ## Installation
@@ -72,11 +73,15 @@ pipe-explorer "cat /var/log/syslog | grep ERROR | awk '{print \$5}' | sort | uni
 | `Tab` / `→` / `l` | Move to the next pipeline stage |
 | `Shift+Tab` / `←` / `h` | Move to the previous pipeline stage |
 | `e` / `Enter` | Edit the current stage's command |
-| `n` / `a` | Add a new stage after the current one |
+| `a` | Add a new stage after the current one |
+| `n` | Add a new stage (or go to next match when search results exist) |
 | `d` | Delete the current stage |
 | `r` | Re-run all stages (bypass cache) |
 | `s` | Save current output to a file |
 | `1` / `2` / `3` | Show stdout / stderr / combined output |
+| `/` | Start a regex search in the current output |
+| `n` / `p` | Jump to the next / previous search match |
+| `Esc` | Clear search highlights |
 | `j` / `↓` | Scroll output down |
 | `k` / `↑` | Scroll output up |
 | `PgDn` / `Ctrl+f` | Page down |
@@ -85,6 +90,19 @@ pipe-explorer "cat /var/log/syslog | grep ERROR | awk '{print \$5}' | sort | uni
 | `G` / `End` | Jump to bottom of output |
 | `?` | Toggle help overlay |
 | `q` / `Ctrl+c` | Quit |
+
+### Search
+
+Press `/` to open the search bar at the bottom of the screen. Type a regex pattern and press `Enter` to confirm; matching text is highlighted in the output and the title bar shows the match count.
+
+- Use `n` / `p` to jump forward / backward through all matches.
+- Prefix the pattern with `\c` to search case-insensitively, or `\C` to force case-sensitive matching (default).
+- Press `Esc` to clear highlights and leave search mode.
+
+```
+/ERROR\c     → case-insensitive search for "error"
+/^[0-9]+     → lines that start with a number
+```
 
 ## License
 
