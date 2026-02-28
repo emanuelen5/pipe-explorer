@@ -83,12 +83,52 @@ impl Pipeline {
 
 /// Parse a pipeline string (e.g. "cmd1 | cmd2 | cmd3") into a Pipeline.
 pub fn parse_pipeline(s: &str) -> Pipeline {
-    let stages: Vec<PipeStage> = s
-        .split(" | ")
+    let stages: Vec<PipeStage> = split_pipeline_stages(s)
+        .into_iter()
         .map(|part| PipeStage::new(part.trim()))
         .filter(|s| !s.command.is_empty())
         .collect();
     Pipeline::new(stages)
+}
+
+fn split_pipeline_stages(s: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut prev_was_backslash = false;
+
+    for (idx, ch) in s.char_indices() {
+        match ch {
+            '\\' if !prev_was_backslash => {
+                prev_was_backslash = true;
+                continue;
+            }
+            '\'' if !in_double_quote && !prev_was_backslash => {
+                in_single_quote = !in_single_quote;
+            }
+            '"' if !in_single_quote && !prev_was_backslash => {
+                in_double_quote = !in_double_quote;
+            }
+            '|' if !in_single_quote && !in_double_quote => {
+                let before = idx.checked_sub(1).and_then(|i| s.as_bytes().get(i));
+                let after = s.as_bytes().get(idx + 1);
+                if before == Some(&b' ') && after == Some(&b' ') {
+                    let stage_end = idx - 1;
+                    parts.push(&s[start..stage_end]);
+                    start = idx + 2;
+                }
+            }
+            _ => {}
+        }
+
+        if ch != '\\' {
+            prev_was_backslash = false;
+        }
+    }
+
+    parts.push(&s[start..]);
+    parts
 }
 
 #[cfg(test)]
@@ -102,6 +142,28 @@ mod tests {
         assert_eq!(p.stages[0].command, "echo hello");
         assert_eq!(p.stages[1].command, "grep hello");
         assert_eq!(p.stages[2].command, "wc -l");
+    }
+
+    #[test]
+    fn test_parse_pipeline_ignores_pipe_inside_single_quotes() {
+        let p = parse_pipeline("gh api repos/emanuelen5/pipe-explorer/commits | jq '.[] | (.sha, .commit.verification.verified)'");
+        assert_eq!(p.stages.len(), 2);
+        assert_eq!(
+            p.stages[0].command,
+            "gh api repos/emanuelen5/pipe-explorer/commits"
+        );
+        assert_eq!(
+            p.stages[1].command,
+            "jq '.[] | (.sha, .commit.verification.verified)'"
+        );
+    }
+
+    #[test]
+    fn test_parse_pipeline_ignores_pipe_inside_double_quotes() {
+        let p = parse_pipeline("printf \"a | b\" | wc -c");
+        assert_eq!(p.stages.len(), 2);
+        assert_eq!(p.stages[0].command, "printf \"a | b\"");
+        assert_eq!(p.stages[1].command, "wc -c");
     }
 
     #[test]
