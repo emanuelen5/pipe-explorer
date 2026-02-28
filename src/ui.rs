@@ -8,6 +8,11 @@ use ratatui::{
 
 use crate::app::{App, AppMode, OutputMode};
 
+/// Maximum width (columns) of the command editor overlay dialog.
+pub const EDITOR_DIALOG_MAX_WIDTH: u16 = 120;
+/// Maximum width (columns) of the save-to-file dialog.
+pub const SAVE_DIALOG_MAX_WIDTH: u16 = 60;
+
 /// Render the full TUI.
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -364,7 +369,7 @@ fn render_search_bar(frame: &mut Frame, app: &App, area: Rect) {
 /// Render the inline command editor overlay.
 fn render_editor_overlay(frame: &mut Frame, app: &App, area: Rect) {
     let height = 3u16;
-    let width = area.width.saturating_sub(4);
+    let width = area.width.saturating_sub(4).min(EDITOR_DIALOG_MAX_WIDTH);
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     let dialog_area = Rect::new(x, y, width, height);
@@ -403,7 +408,10 @@ fn render_editor_overlay(frame: &mut Frame, app: &App, area: Rect) {
         ]
     };
 
-    let para = Paragraph::new(Line::from(display)).block(block);
+    let scroll_x = app.editor_scroll_x.min(u16::MAX as usize) as u16;
+    let para = Paragraph::new(Line::from(display))
+        .block(block)
+        .scroll((0, scroll_x));
     frame.render_widget(para, dialog_area);
 }
 
@@ -446,7 +454,10 @@ fn render_save_overlay(frame: &mut Frame, app: &App, area: Rect) {
         ]
     };
 
-    let para = Paragraph::new(Line::from(display)).block(block);
+    let scroll_x = app.editor_scroll_x.min(u16::MAX as usize) as u16;
+    let para = Paragraph::new(Line::from(display))
+        .block(block)
+        .scroll((0, scroll_x));
     frame.render_widget(para, dialog_area);
 }
 
