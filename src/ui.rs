@@ -32,9 +32,9 @@ pub fn render(frame: &mut Frame, app: &App) {
     render_status_bar(frame, app, chunks[2]);
 
     // Overlay modal dialogs on top
-    match app.mode {
-        AppMode::Editing => render_editor_overlay(frame, app, area),
-        AppMode::Saving => render_save_overlay(frame, app, area),
+    match &app.mode {
+        AppMode::Editing { .. } => render_editor_overlay(frame, app, area),
+        AppMode::Saving(_) => render_save_overlay(frame, app, area),
         AppMode::ConfirmingDelete => render_confirm_delete_overlay(frame, app, area),
         _ => {}
     }
@@ -307,13 +307,10 @@ fn render_output(frame: &mut Frame, app: &App, area: Rect) {
 
 /// Render the status bar at the bottom.
 fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
-    match app.mode {
-        AppMode::Searching => {
-            // Show the search prompt like Vim: /query_with_cursor
-            render_search_bar(frame, app, area);
-            return;
-        }
-        _ => {}
+    if matches!(app.mode, AppMode::Searching) {
+        // Show the search prompt like Vim: /query_with_cursor
+        render_search_bar(frame, app, area);
+        return;
     }
 
     let search_nav_hint = if !app.view().search.matches.is_empty() {
@@ -322,7 +319,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         ""
     };
 
-    let (mode_str, hints) = match app.mode {
+    let (mode_str, hints) = match &app.mode {
         AppMode::Normal => {
             let running = if app.running { " ⟳ Running…" } else { "" };
             (
@@ -335,11 +332,11 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 ),
             )
         }
-        AppMode::Editing => (
+        AppMode::Editing { .. } => (
             "EDIT".to_string(),
             "[Enter]confirm  [Esc]cancel".to_string(),
         ),
-        AppMode::Saving => (
+        AppMode::Saving(_) => (
             "SAVE".to_string(),
             "[Enter]confirm  [Esc]cancel".to_string(),
         ),
@@ -408,6 +405,11 @@ fn render_search_bar(frame: &mut Frame, app: &App, area: Rect) {
 
 /// Render the inline command editor overlay.
 fn render_editor_overlay(frame: &mut Frame, app: &App, area: Rect) {
+    let editor = match &app.mode {
+        AppMode::Editing { editor, .. } => editor,
+        _ => return,
+    };
+
     let height = 3u16;
     let width = area.width.saturating_sub(4).min(EDITOR_DIALOG_MAX_WIDTH);
     let x = area.x + (area.width.saturating_sub(width)) / 2;
@@ -421,8 +423,8 @@ fn render_editor_overlay(frame: &mut Frame, app: &App, area: Rect) {
         .title(format!(" Edit Stage {} Command ", stage_num))
         .style(Style::default().bg(Color::DarkGray));
 
-    let cursor_pos = app.editor_cursor;
-    let content = &app.editor_content;
+    let cursor_pos = editor.cursor;
+    let content = &editor.content;
     // Build spans showing the cursor position
     let display = if cursor_pos < content.len() {
         let (before, after) = content.split_at(cursor_pos);
@@ -445,7 +447,7 @@ fn render_editor_overlay(frame: &mut Frame, app: &App, area: Rect) {
         ]
     };
 
-    let scroll_x = app.editor_scroll_x.min(u16::MAX as usize) as u16;
+    let scroll_x = editor.scroll_x.min(u16::MAX as usize) as u16;
     let para = Paragraph::new(Line::from(display))
         .block(block)
         .scroll((0, scroll_x));
@@ -454,6 +456,11 @@ fn render_editor_overlay(frame: &mut Frame, app: &App, area: Rect) {
 
 /// Render the save-to-file dialog overlay.
 fn render_save_overlay(frame: &mut Frame, app: &App, area: Rect) {
+    let editor = match &app.mode {
+        AppMode::Saving(editor) => editor,
+        _ => return,
+    };
+
     let height = 3u16;
     let width = area.width.saturating_sub(4).min(60);
     let x = area.x + (area.width.saturating_sub(width)) / 2;
@@ -466,8 +473,8 @@ fn render_save_overlay(frame: &mut Frame, app: &App, area: Rect) {
         .title(" Save Output To File ")
         .style(Style::default().bg(Color::DarkGray));
 
-    let cursor_pos = app.editor_cursor;
-    let content = &app.editor_content;
+    let cursor_pos = editor.cursor;
+    let content = &editor.content;
     let display = if cursor_pos < content.len() {
         let (before, after) = content.split_at(cursor_pos);
         let mut chars = after.chars();
@@ -488,7 +495,7 @@ fn render_save_overlay(frame: &mut Frame, app: &App, area: Rect) {
         ]
     };
 
-    let scroll_x = app.editor_scroll_x.min(u16::MAX as usize) as u16;
+    let scroll_x = editor.scroll_x.min(u16::MAX as usize) as u16;
     let para = Paragraph::new(Line::from(display))
         .block(block)
         .scroll((0, scroll_x));

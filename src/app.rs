@@ -37,12 +37,105 @@ impl Default for StageViewState {
     }
 }
 
+/// Inline text-editor state (used for command editing and save-to-file dialogs).
+#[derive(Debug, Clone)]
+pub struct EditorState {
+    /// The text being edited.
+    pub content: String,
+    /// Cursor position within `content` (byte index).
+    pub cursor: usize,
+    /// Horizontal scroll offset (in display columns).
+    pub scroll_x: usize,
+}
+
+impl EditorState {
+    /// Create a new editor pre-filled with `content`, cursor at the end.
+    pub fn new(content: String) -> Self {
+        let cursor = content.len();
+        Self {
+            content,
+            cursor,
+            scroll_x: 0,
+        }
+    }
+
+    /// Create an empty editor.
+    pub fn empty() -> Self {
+        Self {
+            content: String::new(),
+            cursor: 0,
+            scroll_x: 0,
+        }
+    }
+
+    /// Adjust horizontal scroll so the cursor stays visible within `inner_width` columns.
+    pub fn update_scroll(&mut self, inner_width: usize) {
+        if inner_width == 0 {
+            return;
+        }
+        self.scroll_x = compute_editor_scroll(
+            self.scroll_x,
+            &self.content[..self.cursor],
+            inner_width,
+        );
+    }
+
+    /// Handle a key event that mutates the editor buffer (movement, insertion, deletion).
+    pub fn handle_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Backspace => {
+                if self.cursor > 0 {
+                    let pos = self.cursor - 1;
+                    self.content.remove(pos);
+                    self.cursor = pos;
+                }
+            }
+            KeyCode::Delete => {
+                if self.cursor < self.content.len() {
+                    self.content.remove(self.cursor);
+                }
+            }
+            KeyCode::Left => {
+                if self.cursor > 0 {
+                    let s = &self.content[..self.cursor];
+                    self.cursor = s.char_indices().last().map(|(i, _)| i).unwrap_or(0);
+                }
+            }
+            KeyCode::Right => {
+                if self.cursor < self.content.len() {
+                    let s = &self.content[self.cursor..];
+                    let next = s
+                        .char_indices()
+                        .nth(1)
+                        .map(|(i, _)| self.cursor + i)
+                        .unwrap_or(self.content.len());
+                    self.cursor = next;
+                }
+            }
+            KeyCode::Home => {
+                self.cursor = 0;
+            }
+            KeyCode::End => {
+                self.cursor = self.content.len();
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.content.insert(self.cursor, c);
+                self.cursor += c.len_utf8();
+            }
+            _ => {}
+        }
+    }
+}
+
 /// The current interaction mode of the application.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum AppMode {
     Normal,
-    Editing,
-    Saving,
+    Editing {
+        editor: EditorState,
+        pending_new_stage: bool,
+    },
+    Saving(EditorState),
     ConfirmingDelete,
     Searching,
 }
@@ -68,16 +161,8 @@ pub struct App {
     pub error_message: Option<String>,
     /// Is a command currently running in the background?
     pub running: bool,
-    /// Content of the inline text editor (command or filename).
-    pub editor_content: String,
-    /// Cursor position within the editor content (byte index).
-    pub editor_cursor: usize,
-    /// Horizontal scroll offset (in display columns) for the editor text area.
-    pub editor_scroll_x: usize,
     /// Show help overlay?
     pub show_help: bool,
-    /// True while editing a freshly inserted stage (remove on cancel).
-    pending_new_stage: bool,
     /// The executor cache.
     cache: ExecutorCache,
     /// Sender for triggering background execution.
@@ -153,11 +238,7 @@ impl App {
             stage_outputs: Vec::new(),
             error_message: None,
             running: false,
-            editor_content: String::new(),
-            editor_cursor: 0,
-            editor_scroll_x: 0,
             show_help: false,
-            pending_new_stage: false,
             cache: ExecutorCache::new(),
             exec_tx,
             exec_rx,
@@ -334,20 +415,21 @@ impl App {
             .selected_stage()
             .map(|s| s.command.clone())
             .unwrap_or_default();
-        self.editor_content = cmd.clone();
-        self.editor_cursor = cmd.len();
-        self.editor_scroll_x = 0;
-        self.mode = AppMode::Editing;
+        self.mode = AppMode::Editing {
+            editor: EditorState::new(cmd),
+            pending_new_stage: false,
+        };
     }
 
     /// Confirm an edit and update the pipeline stage.
     pub fn confirm_edit(&mut self) {
-        let new_cmd = self.editor_content.clone();
-        if let Some(stage) = self.pipeline.selected_stage_mut() {
-            stage.command = new_cmd;
+        if let AppMode::Editing { editor, .. } =
+            std::mem::replace(&mut self.mode, AppMode::Normal)
+        {
+            if let Some(stage) = self.pipeline.selected_stage_mut() {
+                stage.command = editor.content;
+            }
         }
-        self.mode = AppMode::Normal;
-        self.pending_new_stage = false;
         // Invalidate downstream cache and re-run
         self.cache.clear();
         self.trigger_exec(false);
@@ -355,37 +437,55 @@ impl App {
 
     /// Cancel editing.
     pub fn cancel_edit(&mut self) {
-        if self.pending_new_stage {
+        let pending = matches!(
+            self.mode,
+            AppMode::Editing {
+                pending_new_stage: true,
+                ..
+            }
+        );
+        if pending {
             let removed_idx = self.pipeline.selected;
             self.pipeline.remove_selected();
             self.remove_stage_view(removed_idx);
-            self.pending_new_stage = false;
         }
         self.mode = AppMode::Normal;
-        self.editor_content.clear();
-        self.editor_cursor = 0;
-        self.editor_scroll_x = 0;
     }
 
     /// Start the save-to-file dialog.
     pub fn start_saving(&mut self) {
-        self.editor_content = String::new();
-        self.editor_cursor = 0;
-        self.editor_scroll_x = 0;
-        self.mode = AppMode::Saving;
+        self.mode = AppMode::Saving(EditorState::empty());
     }
 
     /// Confirm saving output to a file.
     pub fn confirm_save(&mut self) {
-        let path = self.editor_content.clone();
-        self.mode = AppMode::Normal;
-        self.editor_content.clear();
-        self.editor_cursor = 0;
-        self.editor_scroll_x = 0;
-        if !path.is_empty() {
-            if let Err(e) = self.save_output(&path) {
-                self.error_message = Some(format!("Save failed: {}", e));
+        if let AppMode::Saving(editor) =
+            std::mem::replace(&mut self.mode, AppMode::Normal)
+        {
+            if !editor.content.is_empty() {
+                if let Err(e) = self.save_output(&editor.content) {
+                    self.error_message = Some(format!("Save failed: {}", e));
+                }
             }
+        }
+    }
+
+    /// Return a shared reference to the active `EditorState`, if any.
+    #[allow(dead_code)]
+    pub fn editor(&self) -> Option<&EditorState> {
+        match &self.mode {
+            AppMode::Editing { editor, .. } => Some(editor),
+            AppMode::Saving(editor) => Some(editor),
+            _ => None,
+        }
+    }
+
+    /// Return a mutable reference to the active `EditorState`, if any.
+    pub fn editor_mut(&mut self) -> Option<&mut EditorState> {
+        match &mut self.mode {
+            AppMode::Editing { editor, .. } => Some(editor),
+            AppMode::Saving(editor) => Some(editor),
+            _ => None,
         }
     }
 
@@ -394,14 +494,9 @@ impl App {
     /// `inner_width` is the number of visible columns in the editor text area
     /// (dialog width minus left/right borders).
     pub fn update_editor_scroll(&mut self, inner_width: usize) {
-        if inner_width == 0 {
-            return;
+        if let Some(editor) = self.editor_mut() {
+            editor.update_scroll(inner_width);
         }
-        self.editor_scroll_x = compute_editor_scroll(
-            self.editor_scroll_x,
-            &self.editor_content[..self.editor_cursor],
-            inner_width,
-        );
     }
 
     /// Handle a single keyboard key event in Normal mode.
@@ -446,7 +541,12 @@ impl App {
                 self.pipeline.insert_after_selected();
                 self.sync_stage_views();
                 self.start_editing();
-                self.pending_new_stage = true;
+                if let AppMode::Editing {
+                    pending_new_stage, ..
+                } = &mut self.mode
+                {
+                    *pending_new_stage = true;
+                }
             }
 
             // 'n': add new stage when no search is active; next match when search is active
@@ -457,7 +557,12 @@ impl App {
                     self.pipeline.insert_after_selected();
                     self.sync_stage_views();
                     self.start_editing();
-                    self.pending_new_stage = true;
+                    if let AppMode::Editing {
+                        pending_new_stage, ..
+                    } = &mut self.mode
+                    {
+                        *pending_new_stage = true;
+                    }
                 }
             }
 
@@ -563,52 +668,18 @@ impl App {
     fn handle_editor_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Esc => self.cancel_edit(),
-            KeyCode::Enter => match self.mode {
-                AppMode::Editing => self.confirm_edit(),
-                AppMode::Saving => self.confirm_save(),
-                _ => {}
-            },
-            KeyCode::Backspace => {
-                if self.editor_cursor > 0 {
-                    let pos = self.editor_cursor - 1;
-                    self.editor_content.remove(pos);
-                    self.editor_cursor = pos;
+            KeyCode::Enter => {
+                if matches!(self.mode, AppMode::Editing { .. }) {
+                    self.confirm_edit();
+                } else if matches!(self.mode, AppMode::Saving(_)) {
+                    self.confirm_save();
                 }
             }
-            KeyCode::Delete => {
-                if self.editor_cursor < self.editor_content.len() {
-                    self.editor_content.remove(self.editor_cursor);
+            _ => {
+                if let Some(editor) = self.editor_mut() {
+                    editor.handle_key(key);
                 }
             }
-            KeyCode::Left => {
-                if self.editor_cursor > 0 {
-                    // Move back by one char boundary
-                    let s = &self.editor_content[..self.editor_cursor];
-                    self.editor_cursor = s.char_indices().last().map(|(i, _)| i).unwrap_or(0);
-                }
-            }
-            KeyCode::Right => {
-                if self.editor_cursor < self.editor_content.len() {
-                    let s = &self.editor_content[self.editor_cursor..];
-                    let next = s
-                        .char_indices()
-                        .nth(1)
-                        .map(|(i, _)| self.editor_cursor + i)
-                        .unwrap_or(self.editor_content.len());
-                    self.editor_cursor = next;
-                }
-            }
-            KeyCode::Home => {
-                self.editor_cursor = 0;
-            }
-            KeyCode::End => {
-                self.editor_cursor = self.editor_content.len();
-            }
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.editor_content.insert(self.editor_cursor, c);
-                self.editor_cursor += c.len_utf8();
-            }
-            _ => {}
         }
         false
     }
@@ -714,12 +785,17 @@ impl App {
         }
 
         match event {
-            Event::Key(key) => match self.mode {
-                AppMode::Normal => self.handle_normal_key(key),
-                AppMode::Editing | AppMode::Saving => self.handle_editor_key(key),
-                AppMode::ConfirmingDelete => self.handle_confirm_delete_key(key),
-                AppMode::Searching => self.handle_search_key(key),
-            },
+            Event::Key(key) => {
+                if matches!(self.mode, AppMode::Normal) {
+                    self.handle_normal_key(key)
+                } else if matches!(self.mode, AppMode::Editing { .. } | AppMode::Saving(_)) {
+                    self.handle_editor_key(key)
+                } else if matches!(self.mode, AppMode::ConfirmingDelete) {
+                    self.handle_confirm_delete_key(key)
+                } else {
+                    self.handle_search_key(key)
+                }
+            }
             _ => false,
         }
     }
@@ -765,9 +841,9 @@ async fn run_inner(
 
         // Keep editor horizontal scroll in sync with the cursor before drawing.
         if let Ok(size) = terminal.size() {
-            let max_w = match app.mode {
-                AppMode::Editing => Some(EDITOR_DIALOG_MAX_WIDTH),
-                AppMode::Saving => Some(SAVE_DIALOG_MAX_WIDTH),
+            let max_w = match &app.mode {
+                AppMode::Editing { .. } => Some(EDITOR_DIALOG_MAX_WIDTH),
+                AppMode::Saving(_) => Some(SAVE_DIALOG_MAX_WIDTH),
                 _ => None,
             };
             if let Some(w) = max_w {
