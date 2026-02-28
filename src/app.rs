@@ -55,6 +55,8 @@ pub struct App {
     pub editor_content: String,
     /// Cursor position within the editor content (byte index).
     pub editor_cursor: usize,
+    /// Horizontal scroll offset (in display columns) for the editor text area.
+    pub editor_scroll_x: usize,
     /// Show help overlay?
     pub show_help: bool,
     /// Search state (query, cursor, matches, current match index).
@@ -67,6 +69,30 @@ pub struct App {
     exec_tx: mpsc::Sender<(Vec<String>, usize, bool)>,
     /// Receiver for execution results.
     exec_rx: mpsc::Receiver<ExecMsg>,
+}
+
+/// Compute the new horizontal scroll offset so `before_cursor` (text before the cursor)
+/// keeps the cursor visible within a text area of `inner_width` columns.
+///
+/// * Scrolls right if the cursor column has moved past the right edge.
+/// * Scrolls left  if the cursor column has moved before the left edge.
+/// * Leaves `current_scroll_x` unchanged when the cursor is already in view.
+fn compute_editor_scroll(
+    current_scroll_x: usize,
+    before_cursor: &str,
+    inner_width: usize,
+) -> usize {
+    if inner_width == 0 {
+        return current_scroll_x;
+    }
+    let cursor_col = before_cursor.chars().count();
+    if cursor_col >= current_scroll_x + inner_width {
+        cursor_col + 1 - inner_width
+    } else if cursor_col < current_scroll_x {
+        cursor_col
+    } else {
+        current_scroll_x
+    }
 }
 
 impl App {
@@ -110,6 +136,7 @@ impl App {
             running: false,
             editor_content: String::new(),
             editor_cursor: 0,
+            editor_scroll_x: 0,
             show_help: false,
             search: SearchState::default(),
             pending_new_stage: false,
@@ -258,6 +285,7 @@ impl App {
             .unwrap_or_default();
         self.editor_content = cmd.clone();
         self.editor_cursor = cmd.len();
+        self.editor_scroll_x = 0;
         self.mode = AppMode::Editing;
     }
 
@@ -283,12 +311,14 @@ impl App {
         self.mode = AppMode::Normal;
         self.editor_content.clear();
         self.editor_cursor = 0;
+        self.editor_scroll_x = 0;
     }
 
     /// Start the save-to-file dialog.
     pub fn start_saving(&mut self) {
         self.editor_content = String::new();
         self.editor_cursor = 0;
+        self.editor_scroll_x = 0;
         self.mode = AppMode::Saving;
     }
 
@@ -298,11 +328,27 @@ impl App {
         self.mode = AppMode::Normal;
         self.editor_content.clear();
         self.editor_cursor = 0;
+        self.editor_scroll_x = 0;
         if !path.is_empty() {
             if let Err(e) = self.save_output(&path) {
                 self.error_message = Some(format!("Save failed: {}", e));
             }
         }
+    }
+
+    /// Adjust the horizontal scroll of the editor so the cursor remains visible.
+    ///
+    /// `inner_width` is the number of visible columns in the editor text area
+    /// (dialog width minus left/right borders).
+    pub fn update_editor_scroll(&mut self, inner_width: usize) {
+        if inner_width == 0 {
+            return;
+        }
+        self.editor_scroll_x = compute_editor_scroll(
+            self.editor_scroll_x,
+            &self.editor_content[..self.editor_cursor],
+            inner_width,
+        );
     }
 
     /// Handle a single keyboard key event in Normal mode.
@@ -602,6 +648,17 @@ impl App {
     }
 }
 
+/// Width cap (columns) for the editor overlay dialog.
+use crate::ui::EDITOR_DIALOG_MAX_WIDTH;
+/// Width cap (columns) for the save dialog.
+use crate::ui::SAVE_DIALOG_MAX_WIDTH;
+
+/// Compute the inner text width for an editor dialog given the terminal width.
+fn editor_inner_width(terminal_width: u16, dialog_max_width: u16) -> usize {
+    let dialog_width = terminal_width.saturating_sub(4).min(dialog_max_width);
+    dialog_width.saturating_sub(2) as usize
+}
+
 /// Run the TUI event loop.
 pub async fn run(mut app: App) -> Result<()> {
     let mut terminal = setup_terminal()?;
@@ -616,6 +673,19 @@ pub async fn run(mut app: App) -> Result<()> {
     loop {
         // Poll for completed background execution
         let exec_done = app.poll_exec_result();
+
+        // Keep editor horizontal scroll in sync with the cursor before drawing.
+        if let Ok(size) = terminal.size() {
+            let max_w = match app.mode {
+                AppMode::Editing => Some(EDITOR_DIALOG_MAX_WIDTH),
+                AppMode::Saving => Some(SAVE_DIALOG_MAX_WIDTH),
+                _ => None,
+            };
+            if let Some(w) = max_w {
+                let inner_w = editor_inner_width(size.width, w);
+                app.update_editor_scroll(inner_w);
+            }
+        }
 
         // Draw the UI
         terminal.draw(|frame| {
@@ -676,4 +746,39 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Re
         crossterm::terminal::LeaveAlternateScreen
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_editor_scroll_cursor_in_view() {
+        // Cursor at col 3, inner_width = 10: no scroll needed.
+        assert_eq!(compute_editor_scroll(0, "hel", 10), 0);
+    }
+
+    #[test]
+    fn test_editor_scroll_cursor_past_right_edge() {
+        // inner_width = 5; cursor at col 7 → scroll_x must become 3.
+        assert_eq!(compute_editor_scroll(0, "0123456", 5), 3);
+    }
+
+    #[test]
+    fn test_editor_scroll_cursor_before_left_edge() {
+        // scroll_x is 5, cursor at col 2 → scroll snaps back.
+        assert_eq!(compute_editor_scroll(5, "01", 5), 2);
+    }
+
+    #[test]
+    fn test_editor_scroll_no_change_when_visible() {
+        // scroll_x = 3, inner_width = 5, cursor at col 4: 3 <= 4 < 8, no change.
+        assert_eq!(compute_editor_scroll(3, "0123", 5), 3);
+    }
+
+    #[test]
+    fn test_editor_scroll_zero_inner_width() {
+        // Should return current scroll unchanged (no-op).
+        assert_eq!(compute_editor_scroll(0, "hello", 0), 0);
+    }
 }
