@@ -1,19 +1,38 @@
-# pipe-explorer
+# Pipe `|` explorer
 
 **pipe-explorer** is an interactive terminal UI (TUI) for building and debugging shell pipelines — one stage at a time.
 
-Instead of running a long pipe command and only seeing the final output, pipe-explorer lets you navigate between each stage of your pipeline and instantly inspect what data flows through at every step. Add, edit, or remove stages on the fly and watch the output update in real time.
+- 🔧 Easily construct and modify shell pipelines
+- ⚡ Parse output from commands that are normally slow
+- 📂 No need for using temporary files
+
+### Example "screenshot"
 
 ```
-┌─ Stage 1 ──────────────┐┌─ Stage 2 ──────────────┐┌─ Stage 3 ──────────────┐
-│ cat /var/log/syslog    ││ grep "ERROR"           ││ awk '{print $5}'       │
-└────────────────────────┘└────────────────────────┘└────────────────────────┘
-┌─ Output (stdout) — Stage 2 ✓ ────────────────────────────────────────────────┐
-│ Feb 26 10:12:05 host kernel: ERROR: unable to handle kernel NULL pointer     │
-│ Feb 26 10:13:22 host app[1234]: ERROR: connection refused to 10.0.0.1:5432  │
-│ Feb 26 10:14:01 host app[1234]: ERROR: retry limit exceeded                  │
-└──────────────────────────────────────────────────────────────────────────────┘
- NORMAL   [q]uit  [e/Enter]edit  [n]ew  [d]el  [Tab/←/→]switch  [1]stdout …
+┌ Stage 1 (1 lines) ──────────────────────────────┐┌ Stage 2 (17 lines) ────────────────────────────┐
+│gh api repos/emanuelen5/pipe-explorer/commits    ││jq -r '.[] | "\(.sha): \(.commit.author.date)"' │
+└────────────────────────────────────────────1/[0]┘└──────────────────────────────────────────17/[0]┘
+┌ Output (stdout) — Stage 2 ────────────────────────────────────────────────────────────────────────┐
+│9f60aebfb2ae2ad3a2a540f1b7c1ac2ab025955f: 2026-02-28T06:37:43Z                                     │
+│c3c25ecf1823609df65310c5ed2dd28dc5ec2327: 2026-02-27T19:45:35Z                                     │
+│6e89c30792950f338a0884347aa03bd30121a9f2: 2026-02-27T19:37:14Z                                     │
+│e523ee6d7512b6ef940bf91ea39a392c13acddac: 2026-02-27T19:35:55Z                                     │
+│2b592cb7d5eac3c23012e2f470a7cff8618f3f07: 2026-02-27T19:34:18Z                                     │
+│c16f5627fcbd11f45664c7187dffae5a652e0c7f: 2026-02-27T19:24:07Z                                     │
+│2aab05e1b841e60266492f9230c3c11a7faecf13: 2026-02-28T06:26:20Z                                     │
+│02cbaa3dd519b4a35c0b165c32a4a6a2e1a84e53: 2026-02-27T18:27:03Z                                     │
+│a9d6357277b70d1f5dc6a07eeb4117b619610a6a: 2026-02-27T17:58:27Z                                     │
+│3afb93f313b5611e2848f431422481fd5d14fb5e: 2026-02-27T17:56:57Z                                     │
+│b2b5bd01c7dc0900f7eea25120c19050d9073cba: 2026-02-27T11:33:30Z                                     │
+│f12db0cff4bf5c48333882996bfac7b2e596f1fe: 2026-02-27T06:39:11Z                                     │
+│c25f1073a1cd2872ef7007f7389277abda6c904c: 2026-02-27T06:28:37Z                                     │
+│908cce749c4a8ef422403919ff86ce62804d8ffe: 2026-02-27T06:15:03Z                                     │
+│fd7bd5ee4c618ee3b86dea71f38841b656b7d6e1: 2026-02-27T06:06:46Z                                     │
+│f4acf759c7a7f43700fc9aba3acefb3df57d0e27: 2026-02-27T05:19:58Z                                     │
+│56a4ff39621bb688b67c4be6463f8de59e86930a: 2026-02-26T21:56:49Z                                     │
+│                                                                                                   │
+└───────────────────────────────────────────────────────────────────────────────────────────────────┘
+ NORMAL    [q]uit  [e/Enter]edit  [a]new  [d]el  [Tab/←/→]switch  [1]stdout  [2]stderr  [3]combined
 ```
 
 ## Features
@@ -21,17 +40,16 @@ Instead of running a long pipe command and only seeing the final output, pipe-ex
 - **Stage-by-stage inspection** — select any stage in your pipeline and see its output immediately
 - **Live editing** — add, edit, or delete pipeline stages with an inline editor
 - **stdout / stderr / combined views** — switch between output streams with `1`, `2`, `3`
-- **Smart caching** — unchanged upstream stages are not re-run; only affected stages are re-executed
-- **Scrollable output** — vim-style navigation (`j`/`k`, `PgDn`/`PgUp`, `g`/`G`)
+- **Stage caching** — only change stages and their dependants are re-evaluated
 - **Save to file** — write the currently viewed output to disk with `s`
-- **Incremental search** — press `/` to search the output with a regex; jump between matches with `n` / `p`
-- **Help overlay** — press `?` to show all keybindings at any time
 
 ## Installation
 
 ### Download a pre-built binary
 
-Pre-built binaries for Linux, macOS, and Windows are attached to every [GitHub Release](https://github.com/emanuelen5/pipe-explorer/releases). Download the archive for your platform, extract it, and place the `pipe-explorer` binary somewhere on your `PATH`.
+Pre-built binaries for Linux, macOS, and Windows are attached to every commit in their respective build workflow. Download the archive for your platform, extract it, and place the `pipe-explorer` binary somewhere on your `PATH`.
+
+<details><summary>Available pre-built binaries</summary>
 
 | Platform | Asset name |
 |---|---|
@@ -39,6 +57,8 @@ Pre-built binaries for Linux, macOS, and Windows are attached to every [GitHub R
 | macOS Apple Silicon | `pipe-explorer-aarch64-apple-darwin.tar.gz` |
 | macOS Intel | `pipe-explorer-x86_64-apple-darwin.tar.gz` |
 | Windows x86-64 | `pipe-explorer-x86_64-pc-windows-msvc.zip` |
+
+</details>
 
 ### Build from source
 
@@ -56,42 +76,21 @@ cargo build --release
 Launch pipe-explorer with an optional starting pipeline (stages separated by ` | `):
 
 ```bash
-# Start empty
+# Start new empty session
 pipe-explorer
 
-# Start with a pre-built pipeline
+# Start with a pre-defined 2-stage pipeline
 pipe-explorer "find . -name '*.rs' | wc -l"
 
-# Debug a complex pipeline
+# Debug a more complex pipeline
 pipe-explorer "cat /var/log/syslog | grep ERROR | awk '{print \$5}' | sort | uniq -c | sort -rn"
 ```
 
 ### Keybindings
 
-| Key | Action |
-|---|---|
-| `Tab` / `→` / `l` | Move to the next pipeline stage |
-| `Shift+Tab` / `←` / `h` | Move to the previous pipeline stage |
-| `e` / `Enter` | Edit the current stage's command |
-| `a` | Add a new stage after the current one |
-| `n` | Add a new stage (or go to next match when search results exist) |
-| `d` | Delete the current stage |
-| `r` | Re-run all stages (bypass cache) |
-| `s` | Save current output to a file |
-| `1` / `2` / `3` | Show stdout / stderr / combined output |
-| `/` | Start a regex search in the current output |
-| `n` / `p` | Jump to the next / previous search match |
-| `Esc` | Clear search highlights |
-| `j` / `↓` | Scroll output down |
-| `k` / `↑` | Scroll output up |
-| `PgDn` / `Ctrl+f` | Page down |
-| `PgUp` / `Ctrl+b` | Page up |
-| `g` / `Home` | Jump to top of output |
-| `G` / `End` | Jump to bottom of output |
-| `?` | Toggle help overlay |
-| `q` / `Ctrl+c` | Quit |
+Press <kbd>?</kbd> while in the app to see all available keybindings.
 
-### Search
+<details><summary>Search</summary>
 
 Press `/` to open the search bar at the bottom of the screen. Type a regex pattern and press `Enter` to confirm; matching text is highlighted in the output and the title bar shows the match count.
 
@@ -103,6 +102,8 @@ Press `/` to open the search bar at the bottom of the screen. Type a regex patte
 /ERROR\c     → case-insensitive search for "error"
 /^[0-9]+     → lines that start with a number
 ```
+
+</details>
 
 ## License
 
