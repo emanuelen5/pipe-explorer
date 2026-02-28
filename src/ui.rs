@@ -61,14 +61,16 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
     for (i, stage) in app.pipeline.stages.iter().enumerate() {
         let is_selected = i == app.pipeline.selected;
 
-        // Determine if this stage exited with an error.
-        let exit_code = app.stage_outputs.get(i).and_then(|o| o.exit_code);
+        let stage_output = app.stage_outputs.get(i);
+        let exit_code = stage_output.and_then(|o| o.exit_code);
         let is_error = matches!(exit_code, Some(code) if code != 0);
+        let line_count = stage_output.map(|o| o.stdout_line_count());
 
-        let title = if is_error {
-            format!(" Stage {} ✗ ", i + 1)
-        } else {
-            format!(" Stage {} ", i + 1)
+        let title = match (is_error, line_count) {
+            (true, Some(lines)) => format!(" Stage {} ✗ ({} lines) ", i + 1, lines),
+            (false, Some(lines)) => format!(" Stage {} ({} lines) ", i + 1, lines),
+            (true, None) => format!(" Stage {} ✗ ", i + 1),
+            (false, None) => format!(" Stage {} ", i + 1),
         };
 
         let stdout_count = app

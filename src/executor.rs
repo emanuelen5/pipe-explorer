@@ -20,6 +20,15 @@ impl StageOutput {
     pub fn stderr_str(&self) -> String {
         String::from_utf8_lossy(&self.stderr).into_owned()
     }
+
+    /// Count the number of lines in stdout without allocating a full String.
+    pub fn stdout_line_count(&self) -> usize {
+        if self.stdout.is_empty() {
+            return 0;
+        }
+        self.stdout.iter().filter(|&&b| b == b'\n').count()
+            + if self.stdout.last() != Some(&b'\n') { 1 } else { 0 }
+    }
 }
 
 /// Cache key: (command_string, sha256 of stdin bytes).
