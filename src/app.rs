@@ -355,7 +355,7 @@ impl App {
 
     /// (Re-)compute search matches for the current output. Resets match index to 0.
     pub fn compute_search_matches(&mut self) {
-        let content = self.current_output_text();
+        let content = crate::ansi::strip_ansi_sgr(&self.current_output_text());
         self.view_mut().search.compute(&content);
     }
 

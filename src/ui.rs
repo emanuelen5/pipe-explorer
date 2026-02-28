@@ -6,6 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 
+use crate::ansi::{ansi_text_to_lines, ansi_text_to_lines_with_highlights};
 use crate::app::{App, AppMode, OutputMode};
 
 /// Maximum width (columns) of the command editor overlay dialog.
@@ -131,51 +132,6 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-/// Build a single output `Line` with search-match spans applied.
-///
-/// `line_matches` is a sorted slice of `(start_byte, end_byte, is_current_match)`.
-fn build_highlighted_line(text: &str, line_matches: &[(usize, usize, bool)]) -> Line<'static> {
-    if line_matches.is_empty() {
-        return Line::from(Span::raw(text.to_owned()));
-    }
-
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut pos = 0usize;
-
-    for &(start, end, is_current) in line_matches {
-        // Clamp to valid byte boundaries
-        let start = start.min(text.len());
-        let end = end.min(text.len());
-        if start > end {
-            continue;
-        }
-        // Text before this match
-        if pos < start {
-            spans.push(Span::raw(text[pos..start].to_owned()));
-        }
-        // The match itself
-        let style = if is_current {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Rgb(180, 140, 30))
-        };
-        spans.push(Span::styled(text[start..end].to_owned(), style));
-        pos = end;
-    }
-
-    // Remaining text after all matches
-    if pos < text.len() {
-        spans.push(Span::raw(text[pos..].to_owned()));
-    }
-
-    Line::from(spans)
-}
-
 /// Render the output pager area.
 fn render_output(frame: &mut Frame, app: &App, area: Rect) {
     let exit_info = if !app.stage_outputs.is_empty() {
@@ -238,8 +194,8 @@ fn render_output(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let content = app.current_output_text();
-    if content.is_empty() {
+    let raw_content = app.current_output_text();
+    if raw_content.is_empty() {
         let hint = Paragraph::new("(no output)")
             .style(Style::default().fg(Color::DarkGray))
             .alignment(Alignment::Center);
@@ -247,11 +203,10 @@ fn render_output(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    // Build a lookup: line_index → list of (start, end, is_current)
     let has_matches = !view.search.matches.is_empty();
-    let mut line_match_map: std::collections::HashMap<usize, Vec<(usize, usize, bool)>> =
-        std::collections::HashMap::new();
-    if has_matches {
+    let lines: Vec<Line> = if has_matches {
+        let mut line_match_map: std::collections::HashMap<usize, Vec<(usize, usize, bool)>> =
+            std::collections::HashMap::new();
         for (idx, &(line, start, end)) in view.search.matches.iter().enumerate() {
             let is_current = idx == view.search.match_idx;
             line_match_map
@@ -259,19 +214,10 @@ fn render_output(frame: &mut Frame, app: &App, area: Rect) {
                 .or_default()
                 .push((start, end, is_current));
         }
-    }
-
-    let lines: Vec<Line> = content
-        .lines()
-        .enumerate()
-        .map(|(line_idx, l)| {
-            if let Some(matches) = line_match_map.get(&line_idx) {
-                build_highlighted_line(l, matches)
-            } else {
-                Line::from(Span::raw(l.to_owned()))
-            }
-        })
-        .collect();
+        ansi_text_to_lines_with_highlights(&raw_content, &line_match_map)
+    } else {
+        ansi_text_to_lines(&raw_content)
+    };
 
     let total_lines = lines.len();
     let visible_height = inner.height as usize;
@@ -579,3 +525,4 @@ pub fn render_help(frame: &mut Frame, area: Rect) {
     );
     frame.render_widget(list, help_area);
 }
+

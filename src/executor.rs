@@ -4,6 +4,8 @@ use std::process::{Command, Stdio};
 
 use sha2::{Digest, Sha256};
 
+use crate::ansi::strip_ansi_sgr_bytes;
+
 /// The result of executing a single pipeline stage.
 #[derive(Debug, Clone)]
 pub struct StageOutput {
@@ -94,6 +96,13 @@ fn run_shell_command(command: &str, stdin_bytes: &[u8]) -> anyhow::Result<StageO
     let mut child = Command::new("sh")
         .arg("-c")
         .arg(command)
+        // Hint and encourage color output so ANSI can be rendered in the TUI.
+        // Downstream stages still receive de-ANSI'd stdin in execute_pipeline_stages.
+        .env("TERM", "xterm-256color")
+        .env("COLORTERM", "truecolor")
+        .env("CLICOLOR", "1")
+        .env("CLICOLOR_FORCE", "1")
+        .env("FORCE_COLOR", "3")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -134,7 +143,7 @@ pub fn execute_pipeline_stages(
 
     for cmd in commands.iter().take(up_to + 1) {
         let out = cache.run(cmd, &stdin, force)?;
-        stdin = out.stdout.clone();
+        stdin = strip_ansi_sgr_bytes(&out.stdout);
         outputs.push(out);
     }
 
@@ -187,5 +196,23 @@ mod tests {
         assert_eq!(outputs.len(), 2);
         let word_count: u32 = outputs[1].stdout_str().trim().parse().unwrap();
         assert_eq!(word_count, 2);
+    }
+
+    #[test]
+    fn test_execute_pipeline_strips_ansi_for_next_stage_input() {
+        let mut cache = ExecutorCache::new();
+        let commands = vec![
+            "printf '\\033[31mhello\\033[0m\\n'".to_string(),
+            "wc -c".to_string(),
+        ];
+        let outputs = execute_pipeline_stages(&mut cache, &commands, 1, false).unwrap();
+        assert_eq!(outputs.len(), 2);
+
+        // Downstream stage receives "hello\n" (6 bytes), not ANSI sequences.
+        let byte_count: u32 = outputs[1].stdout_str().trim().parse().unwrap();
+        assert_eq!(byte_count, 6);
+
+        // Original stage output still retains ANSI bytes for UI color rendering.
+        assert!(outputs[0].stdout.windows(2).any(|w| w == [0x1b, b'[']));
     }
 }

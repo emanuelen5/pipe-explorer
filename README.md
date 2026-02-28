@@ -40,6 +40,7 @@
 - **Stage-by-stage inspection** — select any stage in your pipeline and see its output immediately
 - **Live editing** — add, edit, or delete pipeline stages with an inline editor
 - **stdout / stderr / combined views** — switch between output streams with `1`, `2`, `3`
+- **ANSI color output** — preserves terminal color sequences so colorized command output stays readable
 - **Stage caching** — only change stages and their dependants are re-evaluated
 - **Save to file** — write the currently viewed output to disk with `s`
 
