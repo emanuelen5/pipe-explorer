@@ -138,6 +138,8 @@ pub enum AppMode {
     Saving(EditorState),
     ConfirmingDelete,
     Searching,
+    /// Vim-style `:command` mode.
+    Command(EditorState),
 }
 
 /// Messages sent from the background executor task to the main event loop.
@@ -485,6 +487,7 @@ impl App {
         match &mut self.mode {
             AppMode::Editing { editor, .. } => Some(editor),
             AppMode::Saving(editor) => Some(editor),
+            AppMode::Command(editor) => Some(editor),
             _ => None,
         }
     }
@@ -659,6 +662,11 @@ impl App {
                 self.show_help = !self.show_help;
             }
 
+            // Enter command mode (vim-style ':')
+            KeyCode::Char(':') => {
+                self.mode = AppMode::Command(EditorState::empty());
+            }
+
             _ => {}
         }
         false
@@ -762,6 +770,51 @@ impl App {
         false
     }
 
+    /// Known commands supported in command mode.
+    const KNOWN_COMMANDS: &'static [&'static str] = &["help", "quit"];
+
+    /// Handle a key event while in command mode (`:` prompt).
+    fn handle_command_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = AppMode::Normal;
+            }
+            KeyCode::Enter => {
+                let cmd = if let AppMode::Command(ref editor) = self.mode {
+                    editor.content.trim().to_string()
+                } else {
+                    String::new()
+                };
+                self.mode = AppMode::Normal;
+                // Dispatch the command
+                if cmd == "h" || cmd == "help" {
+                    self.show_help = true;
+                } else if cmd == "q" || cmd == "quit" {
+                    return true;
+                }
+            }
+            KeyCode::Tab => {
+                // Tab-complete the current content against known commands.
+                if let AppMode::Command(ref mut editor) = self.mode {
+                    let completed = Self::KNOWN_COMMANDS
+                        .iter()
+                        .find(|&&cmd| cmd.starts_with(editor.content.as_str()))
+                        .copied();
+                    if let Some(cmd) = completed {
+                        editor.content = cmd.to_string();
+                        editor.cursor = cmd.len();
+                    }
+                }
+            }
+            _ => {
+                if let Some(editor) = self.editor_mut() {
+                    editor.handle_key(key);
+                }
+            }
+        }
+        false
+    }
+
     /// Ensure stage_views has an entry for every pipeline stage.
     fn sync_stage_views(&mut self) {
         while self.stage_views.len() < self.pipeline.len() {
@@ -792,6 +845,8 @@ impl App {
                     self.handle_editor_key(key)
                 } else if matches!(self.mode, AppMode::ConfirmingDelete) {
                     self.handle_confirm_delete_key(key)
+                } else if matches!(self.mode, AppMode::Command(_)) {
+                    self.handle_command_key(key)
                 } else {
                     self.handle_search_key(key)
                 }

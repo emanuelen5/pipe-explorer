@@ -38,8 +38,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         AppMode::Saving(_) => render_save_overlay(frame, app, area),
         AppMode::ConfirmingDelete => render_confirm_delete_overlay(frame, app, area),
         _ => {}
-    }
-}
+    }}
 
 /// Render the pipeline stages bar at the top.
 fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
@@ -259,6 +258,11 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
+    if matches!(app.mode, AppMode::Command(_)) {
+        render_command_bar(frame, app, area);
+        return;
+    }
+
     let search_nav_hint = if !app.view().search.matches.is_empty() {
         "  [n]ext-match  [p]rev-match  [Esc]clear-search"
     } else {
@@ -273,7 +277,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 format!(
                     "[q]uit  [e/Enter]edit  [a]new  [d]el  [Tab/←/→]switch  \
                      [1]stdout  [2]stderr  [3]combined  [s]ave  [r]erun  \
-                     [/]search  [j/k/PgDn/PgUp/gg/G]scroll{}",
+                     [/]search  [j/k/PgDn/PgUp/gg/G]scroll  [?/:h]help{}",
                     search_nav_hint
                 ),
             )
@@ -290,7 +294,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             "DELETE?".to_string(),
             "[y]confirm delete  [any]cancel".to_string(),
         ),
-        AppMode::Searching => unreachable!(),
+        AppMode::Searching | AppMode::Command(_) => unreachable!(),
     };
 
     let left = Span::styled(
@@ -343,6 +347,52 @@ fn render_search_bar(frame: &mut Frame, app: &App, area: Rect) {
     spans.extend(cursor_spans);
     spans.push(Span::styled(
         "  [Enter]search  [Esc]cancel",
+        Style::default().fg(Color::DarkGray),
+    ));
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Render the vim-style command bar (shown in place of the status bar when in Command mode).
+fn render_command_bar(frame: &mut Frame, app: &App, area: Rect) {
+    let editor = match &app.mode {
+        AppMode::Command(editor) => editor,
+        _ => return,
+    };
+    let cursor_pos = editor.cursor;
+    let content = &editor.content;
+
+    let prefix = Span::styled(
+        ":",
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    let cursor_spans = if cursor_pos < content.len() {
+        let (before, after) = content.split_at(cursor_pos);
+        let mut chars = after.chars();
+        let cur_ch = chars.next().unwrap_or(' ');
+        let rest: String = chars.collect();
+        vec![
+            Span::raw(before.to_owned()),
+            Span::styled(
+                cur_ch.to_string(),
+                Style::default().fg(Color::Black).bg(Color::White),
+            ),
+            Span::raw(rest),
+        ]
+    } else {
+        vec![
+            Span::raw(content.clone()),
+            Span::styled(" ", Style::default().fg(Color::Black).bg(Color::White)),
+        ]
+    };
+
+    let mut spans = vec![prefix];
+    spans.extend(cursor_spans);
+    spans.push(Span::styled(
+        "  [Tab]complete  [Enter]run  [Esc]cancel",
         Style::default().fg(Color::DarkGray),
     ));
 
