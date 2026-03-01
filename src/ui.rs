@@ -203,7 +203,7 @@ fn render_output(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     let has_matches = !view.search.matches.is_empty();
-    let lines: Vec<Line> = if has_matches {
+    let mut lines: Vec<Line> = if has_matches {
         let mut line_match_map: std::collections::HashMap<usize, Vec<(usize, usize, bool)>> =
             std::collections::HashMap::new();
         for (idx, &(line, start, end)) in view.search.matches.iter().enumerate() {
@@ -217,6 +217,30 @@ fn render_output(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         ansi_text_to_lines(&raw_content)
     };
+
+    // In combined mode, prepend a 1-column margin indicating the source stream:
+    // a yellow "│" for stderr lines, a space for stdout lines.
+    // `stderr_map` has one entry per `CombinedLine` (== one entry per rendered line);
+    // `unwrap_or(false)` handles any transient mismatch (e.g. trailing empty lines).
+    let stderr_map = app.combined_stderr_map();
+    if !matches!(app.view().output_mode, OutputMode::Combined) {
+        for (i, line) in lines.iter_mut().enumerate() {
+            let is_stderr = stderr_map.get(i).copied().unwrap_or(false);
+            if is_stderr {
+                for span in &mut line.spans {
+                    if span.style.bg.is_none() {
+                        span.style = span.style.fg(Color::DarkGray);
+                    }
+                }
+            }
+            let margin = if is_stderr {
+                Span::styled(">", Style::default().bg(Color::Yellow).fg(Color::Black))
+            } else {
+                Span::raw(" ")
+            };
+            line.spans.insert(0, margin);
+        }
+    }
 
     let total_lines = lines.len();
     let visible_height = inner.height as usize;

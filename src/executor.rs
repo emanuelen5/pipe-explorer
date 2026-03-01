@@ -1,10 +1,21 @@
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
+use std::sync::mpsc as std_mpsc;
 
 use sha2::{Digest, Sha256};
 
 use crate::ansi::strip_ansi_sgr_bytes;
+
+/// A single chunk captured from either stdout or stderr of a child process,
+/// representing one line of output (including the trailing `\n`, if any).
+#[derive(Debug, Clone)]
+pub struct CombinedLine {
+    /// `true` if this chunk came from stderr; `false` for stdout.
+    pub is_stderr: bool,
+    /// Raw bytes of the line (may include a trailing newline).
+    pub content: Vec<u8>,
+}
 
 /// The result of executing a single pipeline stage.
 #[derive(Debug, Clone)]
@@ -12,6 +23,8 @@ pub struct StageOutput {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub exit_code: Option<i32>,
+    /// Lines from stdout and stderr interleaved in the order they were received.
+    pub combined: Vec<CombinedLine>,
 }
 
 impl StageOutput {
@@ -92,6 +105,34 @@ fn sha256(data: &[u8]) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
+/// Read all lines from `reader` line-by-line and send each as a `CombinedLine` to `tx`.
+///
+/// Each line includes its trailing `\n` when present.  A final partial line (with no
+/// trailing `\n`) is sent as-is.  Stops when EOF is reached or the receiver is dropped.
+fn read_to_channel(mut reader: impl Read, is_stderr: bool, tx: std_mpsc::Sender<CombinedLine>) {
+    let mut pending: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                pending.extend_from_slice(&buf[..n]);
+                while let Some(pos) = pending.iter().position(|&b| b == b'\n') {
+                    let line: Vec<u8> = pending.drain(..=pos).collect();
+                    if tx.send(CombinedLine { is_stderr, content: line }).is_err() {
+                        return;
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    // Send any remaining bytes (last line without trailing \n).
+    if !pending.is_empty() {
+        let _ = tx.send(CombinedLine { is_stderr, content: pending });
+    }
+}
+
 fn run_shell_command(command: &str, stdin_bytes: &[u8]) -> anyhow::Result<StageOutput> {
     let mut child = Command::new("sh")
         .arg("-c")
@@ -111,7 +152,7 @@ fn run_shell_command(command: &str, stdin_bytes: &[u8]) -> anyhow::Result<StageO
     // Write stdin on a separate thread to avoid deadlock: if the child's
     // stdout/stderr pipe buffers fill up while we're still writing stdin,
     // both sides would block forever.  By writing in a background thread,
-    // wait_with_output() can drain stdout/stderr concurrently.
+    // the stdout/stderr reader threads can drain concurrently.
     let stdin_handle = child.stdin.take().unwrap();
     let stdin_data = stdin_bytes.to_vec();
     let writer = std::thread::spawn(move || {
@@ -120,30 +161,73 @@ fn run_shell_command(command: &str, stdin_bytes: &[u8]) -> anyhow::Result<StageO
         // dropping `w` closes the pipe, signalling EOF
     });
 
-    let output = child.wait_with_output()?;
+    // Capture stdout and stderr concurrently so we can record their interleaving order.
+    let (tx, rx) = std_mpsc::channel::<CombinedLine>();
+
+    let tx_out = tx.clone();
+    let stdout_pipe = child.stdout.take().unwrap();
+    let stdout_thread = std::thread::spawn(move || {
+        read_to_channel(stdout_pipe, false, tx_out);
+    });
+
+    // `tx` is consumed (transferred) here to become the stderr sender; `tx_out` (cloned
+    // above) remains the stdout sender.  Dropping both senders closes the channel.
+    let tx_err = tx;
+    let stderr_pipe = child.stderr.take().unwrap();
+    let stderr_thread = std::thread::spawn(move || {
+        read_to_channel(stderr_pipe, true, tx_err);
+    });
+
+    let status = child.wait()?;
     let _ = writer.join();
+    let _ = stdout_thread.join();
+    let _ = stderr_thread.join();
+
+    // Collect lines in the order they arrived (temporal interleaving).
+    let combined: Vec<CombinedLine> = rx.try_iter().collect();
+
+    let stdout: Vec<u8> = combined
+        .iter()
+        .filter(|l| !l.is_stderr)
+        .flat_map(|l| l.content.iter().copied())
+        .collect();
+    let stderr: Vec<u8> = combined
+        .iter()
+        .filter(|l| l.is_stderr)
+        .flat_map(|l| l.content.iter().copied())
+        .collect();
 
     Ok(StageOutput {
-        stdout: output.stdout,
-        stderr: output.stderr,
-        exit_code: output.status.code(),
+        stdout,
+        stderr,
+        exit_code: status.code(),
+        combined,
     })
 }
 
 /// Execute all stages of the pipeline up to and including `up_to_stage`.
 /// Returns the outputs for each stage.
+///
+/// `use_stderr_as_next_input[i]` – when `true`, the stderr of stage `i` is piped as stdin
+/// to stage `i+1` instead of stdout.  Missing entries default to `false` (use stdout).
 pub fn execute_pipeline_stages(
     cache: &mut ExecutorCache,
     commands: &[String],
     up_to: usize,
     force: bool,
+    use_stderr_as_next_input: &[bool],
 ) -> anyhow::Result<Vec<StageOutput>> {
     let mut outputs: Vec<StageOutput> = Vec::new();
     let mut stdin: Vec<u8> = Vec::new();
 
-    for cmd in commands.iter().take(up_to + 1) {
+    for (i, cmd) in commands.iter().take(up_to + 1).enumerate() {
         let out = cache.run(cmd, &stdin, force)?;
-        stdin = strip_ansi_sgr_bytes(&out.stdout);
+        let use_stderr = use_stderr_as_next_input.get(i).copied().unwrap_or(false);
+        stdin = if use_stderr {
+            strip_ansi_sgr_bytes(&out.stderr)
+        } else {
+            strip_ansi_sgr_bytes(&out.stdout)
+        };
         outputs.push(out);
     }
 
@@ -192,7 +276,7 @@ mod tests {
     fn test_execute_pipeline_stages() {
         let mut cache = ExecutorCache::new();
         let commands = vec!["echo hello world".to_string(), "wc -w".to_string()];
-        let outputs = execute_pipeline_stages(&mut cache, &commands, 1, false).unwrap();
+        let outputs = execute_pipeline_stages(&mut cache, &commands, 1, false, &[]).unwrap();
         assert_eq!(outputs.len(), 2);
         let word_count: u32 = outputs[1].stdout_str().trim().parse().unwrap();
         assert_eq!(word_count, 2);
@@ -205,7 +289,7 @@ mod tests {
             "printf '\\033[31mhello\\033[0m\\n'".to_string(),
             "wc -c".to_string(),
         ];
-        let outputs = execute_pipeline_stages(&mut cache, &commands, 1, false).unwrap();
+        let outputs = execute_pipeline_stages(&mut cache, &commands, 1, false, &[]).unwrap();
         assert_eq!(outputs.len(), 2);
 
         // Downstream stage receives "hello\n" (6 bytes), not ANSI sequences.
@@ -214,5 +298,39 @@ mod tests {
 
         // Original stage output still retains ANSI bytes for UI color rendering.
         assert!(outputs[0].stdout.windows(2).any(|w| w == [0x1b, b'[']));
+    }
+
+    #[test]
+    fn test_combined_interleaving_captures_stderr() {
+        let mut cache = ExecutorCache::new();
+        // Command writes to both stdout and stderr.
+        let out = cache.run("echo out; echo err >&2", b"", false).unwrap();
+        assert_eq!(out.stdout_str().trim(), "out");
+        assert_eq!(out.stderr_str().trim(), "err");
+        // combined should have both lines.
+        let combined_text: String = out
+            .combined
+            .iter()
+            .map(|l| String::from_utf8_lossy(&l.content).into_owned())
+            .collect();
+        assert!(combined_text.contains("out"));
+        assert!(combined_text.contains("err"));
+    }
+
+    #[test]
+    fn test_execute_pipeline_stderr_as_next_input() {
+        let mut cache = ExecutorCache::new();
+        // Stage 0 prints to stderr; stage 1 counts bytes of its stdin.
+        let commands = vec![
+            "echo errline >&2".to_string(),
+            "wc -c".to_string(),
+        ];
+        // use_stderr=true for stage 0 → stage 1 receives stderr of stage 0.
+        let outputs =
+            execute_pipeline_stages(&mut cache, &commands, 1, false, &[true]).unwrap();
+        assert_eq!(outputs.len(), 2);
+        let byte_count: u32 = outputs[1].stdout_str().trim().parse().unwrap();
+        // "errline\n" is 8 bytes.
+        assert_eq!(byte_count, 8);
     }
 }
