@@ -223,11 +223,18 @@ fn render_output(frame: &mut Frame, app: &App, area: Rect) {
     // `stderr_map` has one entry per `CombinedLine` (== one entry per rendered line);
     // `unwrap_or(false)` handles any transient mismatch (e.g. trailing empty lines).
     let stderr_map = app.combined_stderr_map();
-    if !stderr_map.is_empty() {
+    if !matches!(app.view().output_mode, OutputMode::Combined) {
         for (i, line) in lines.iter_mut().enumerate() {
             let is_stderr = stderr_map.get(i).copied().unwrap_or(false);
+            if is_stderr {
+                for span in &mut line.spans {
+                    if span.style.bg.is_none() {
+                        span.style = span.style.fg(Color::DarkGray);
+                    }
+                }
+            }
             let margin = if is_stderr {
-                Span::styled("│", Style::default().fg(Color::Yellow))
+                Span::styled(">", Style::default().bg(Color::Yellow).fg(Color::Black))
             } else {
                 Span::raw(" ")
             };

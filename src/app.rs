@@ -342,9 +342,6 @@ impl App {
     /// whether each line originated from stderr.  Only meaningful in Combined mode;
     /// returns an empty vec otherwise.
     pub fn combined_stderr_map(&self) -> Vec<bool> {
-        if !matches!(self.view().output_mode, OutputMode::Combined) {
-            return vec![];
-        }
         if self.pipeline.is_empty() || self.stage_outputs.is_empty() {
             return vec![];
         }
