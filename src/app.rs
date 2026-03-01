@@ -168,7 +168,7 @@ pub struct App {
     /// The executor cache.
     cache: ExecutorCache,
     /// Sender for triggering background execution.
-    exec_tx: mpsc::Sender<(Vec<String>, usize, bool)>,
+    exec_tx: mpsc::Sender<(Vec<String>, usize, bool, Vec<bool>)>,
     /// Receiver for execution results.
     exec_rx: mpsc::Receiver<ExecMsg>,
 }
@@ -199,7 +199,7 @@ fn compute_editor_scroll(
 
 impl App {
     pub fn new(pipeline: Pipeline) -> Self {
-        let (exec_tx, mut inner_rx) = mpsc::channel::<(Vec<String>, usize, bool)>(8);
+        let (exec_tx, mut inner_rx) = mpsc::channel::<(Vec<String>, usize, bool, Vec<bool>)>(8);
         let (inner_tx, exec_rx) = mpsc::channel::<ExecMsg>(8);
 
         // Spawn a background task that runs commands and sends results back.
@@ -207,10 +207,10 @@ impl App {
         // tokio runtime with blocking process I/O.
         tokio::spawn(async move {
             let mut cache = ExecutorCache::new();
-            while let Some((commands, up_to, force)) = inner_rx.recv().await {
+            while let Some((commands, up_to, force, use_stderr)) = inner_rx.recv().await {
                 let mut c = cache;
                 let (result, returned_cache) = tokio::task::spawn_blocking(move || {
-                    let r = execute_pipeline_stages(&mut c, &commands, up_to, force);
+                    let r = execute_pipeline_stages(&mut c, &commands, up_to, force, &use_stderr);
                     (r, c)
                 })
                 .await
@@ -259,11 +259,17 @@ impl App {
             .map(|s| s.command.clone())
             .collect();
         let up_to = self.pipeline.selected;
+        // Determine which stages pipe stderr (instead of stdout) into the next stage.
+        let use_stderr: Vec<bool> = self
+            .stage_views
+            .iter()
+            .map(|v| v.output_mode == OutputMode::Stderr)
+            .collect();
         let tx = self.exec_tx.clone();
         self.running = true;
         self.error_message = None;
         tokio::spawn(async move {
-            let _ = tx.send((commands, up_to, force)).await;
+            let _ = tx.send((commands, up_to, force, use_stderr)).await;
         });
     }
 
@@ -324,10 +330,33 @@ impl App {
         match self.view().output_mode {
             OutputMode::Stdout => out.stdout_str(),
             OutputMode::Stderr => out.stderr_str(),
-            OutputMode::Combined => {
-                format!("{}{}", out.stdout_str(), out.stderr_str())
-            }
+            OutputMode::Combined => out
+                .combined
+                .iter()
+                .map(|l| String::from_utf8_lossy(&l.content).into_owned())
+                .collect(),
         }
+    }
+
+    /// Returns a vector of booleans (one per line of `current_output_text()`) indicating
+    /// whether each line originated from stderr.  Only meaningful in Combined mode;
+    /// returns an empty vec otherwise.
+    pub fn combined_stderr_map(&self) -> Vec<bool> {
+        if !matches!(self.view().output_mode, OutputMode::Combined) {
+            return vec![];
+        }
+        if self.pipeline.is_empty() || self.stage_outputs.is_empty() {
+            return vec![];
+        }
+        let idx = self
+            .pipeline
+            .selected
+            .min(self.stage_outputs.len().saturating_sub(1));
+        self.stage_outputs[idx]
+            .combined
+            .iter()
+            .map(|cl| cl.is_stderr)
+            .collect()
     }
 
     /// Number of lines in current output.
@@ -984,6 +1013,7 @@ mod tests {
             stdout: stdout.as_bytes().to_vec(),
             stderr: vec![],
             exit_code: Some(0),
+            combined: vec![],
         }
     }
 
@@ -992,6 +1022,7 @@ mod tests {
             stdout: vec![],
             stderr: b"error".to_vec(),
             exit_code: Some(exit_code),
+            combined: vec![],
         }
     }
 
