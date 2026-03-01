@@ -67,10 +67,10 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
         let line_count = stage_output.map(|o| o.stdout_line_count());
 
         let title = match (is_error, line_count) {
-            (true, Some(lines)) => format!(" Stage {} ✗ ({} lines) ", i + 1, lines),
-            (false, Some(lines)) => format!(" Stage {} ({} lines) ", i + 1, lines),
-            (true, None) => format!(" Stage {} ✗ ", i + 1),
-            (false, None) => format!(" Stage {} ", i + 1),
+            (true, Some(lines)) => format!("✗ ({} lines) ", lines),
+            (false, Some(lines)) => format!("{} lines ", lines),
+            (true, None) => format!(" ✗ "),
+            (false, None) => format!(" "),
         };
 
         let stdout_count = app
@@ -171,9 +171,8 @@ fn render_output(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let title = format!(
-        " Output ({}) — Stage {}{}{} ",
+        " Output ({}) — {}{} ",
         mode_label,
-        app.pipeline.selected + 1,
         exit_info,
         search_info,
     );
