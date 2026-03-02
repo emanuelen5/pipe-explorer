@@ -73,11 +73,8 @@ impl EditorState {
         if inner_width == 0 {
             return;
         }
-        self.scroll_x = compute_editor_scroll(
-            self.scroll_x,
-            &self.content[..self.cursor],
-            inner_width,
-        );
+        self.scroll_x =
+            compute_editor_scroll(self.scroll_x, &self.content[..self.cursor], inner_width);
     }
 
     /// Handle a key event that mutates the editor buffer (movement, insertion, deletion).
@@ -451,8 +448,7 @@ impl App {
 
     /// Confirm an edit and update the pipeline stage.
     pub fn confirm_edit(&mut self) {
-        if let AppMode::Editing { editor, .. } =
-            std::mem::replace(&mut self.mode, AppMode::Normal)
+        if let AppMode::Editing { editor, .. } = std::mem::replace(&mut self.mode, AppMode::Normal)
         {
             if let Some(stage) = self.pipeline.selected_stage_mut() {
                 stage.command = editor.content;
@@ -487,9 +483,7 @@ impl App {
 
     /// Confirm saving output to a file.
     pub fn confirm_save(&mut self) {
-        if let AppMode::Saving(editor) =
-            std::mem::replace(&mut self.mode, AppMode::Normal)
-        {
+        if let AppMode::Saving(editor) = std::mem::replace(&mut self.mode, AppMode::Normal) {
             if !editor.content.is_empty() {
                 if let Err(e) = self.save_output(&editor.content) {
                     self.error_message = Some(format!("Save failed: {}", e));
@@ -541,7 +535,7 @@ impl App {
 
         match key.code {
             // Navigation between stages
-            KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
+            KeyCode::Right | KeyCode::Char('l') => {
                 self.pipeline.select_next();
                 // Only trigger execution if this stage's output isn't already cached.
                 if self.pipeline.selected >= self.stage_outputs.len() {
@@ -549,7 +543,7 @@ impl App {
                 }
                 self.compute_search_matches();
             }
-            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
+            KeyCode::Left | KeyCode::Char('h') => {
                 self.pipeline.select_prev();
                 // Only trigger execution if this stage's output isn't already cached.
                 if self.pipeline.selected >= self.stage_outputs.len() {
@@ -559,14 +553,14 @@ impl App {
             }
 
             // Editing
-            KeyCode::Char('e') | KeyCode::Enter => {
+            KeyCode::Char('i') => {
                 if !self.pipeline.is_empty() {
                     self.start_editing();
                 }
             }
 
-            // Add new stage (also always available via 'a'; 'n' navigates when search is active)
-            KeyCode::Char('a') => {
+            // Add new stage
+            KeyCode::Char('o') => {
                 self.pipeline.insert_after_selected();
                 self.sync_stage_views();
                 self.start_editing();
@@ -578,32 +572,16 @@ impl App {
                 }
             }
 
-            // 'n': add new stage when no search is active; next match when search is active
+            // Search forward/back
             KeyCode::Char('n') => {
-                if !self.view().search.matches.is_empty() {
-                    self.search_next();
-                } else {
-                    self.pipeline.insert_after_selected();
-                    self.sync_stage_views();
-                    self.start_editing();
-                    if let AppMode::Editing {
-                        pending_new_stage, ..
-                    } = &mut self.mode
-                    {
-                        *pending_new_stage = true;
-                    }
-                }
+                self.search_next();
             }
-
-            // Navigate to previous search match
-            KeyCode::Char('p') => {
-                if !self.view().search.matches.is_empty() {
-                    self.search_prev();
-                }
+            KeyCode::Char('N') => {
+                self.search_prev();
             }
 
             // Delete stage
-            KeyCode::Char('d') => {
+            KeyCode::Char('x') | KeyCode::Delete => {
                 if !self.pipeline.is_empty() {
                     let is_last = self.pipeline.selected == self.pipeline.len() - 1;
                     if is_last || self.pipeline.len() == 1 {
@@ -634,6 +612,15 @@ impl App {
             }
 
             // Output mode
+            KeyCode::Char('m') => {
+                match self.view().output_mode {
+                    OutputMode::Stdout => self.view_mut().output_mode = OutputMode::Stderr,
+                    OutputMode::Stderr => self.view_mut().output_mode = OutputMode::Combined,
+                    OutputMode::Combined => self.view_mut().output_mode = OutputMode::Stdout,
+                }
+                self.view_mut().scroll = 0;
+                self.compute_search_matches();
+            }
             KeyCode::Char('1') => {
                 self.view_mut().output_mode = OutputMode::Stdout;
                 self.view_mut().scroll = 0;
@@ -663,6 +650,12 @@ impl App {
                 if key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 self.scroll_up(20);
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.scroll_down(20)
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.scroll_up(20)
             }
             KeyCode::PageUp => self.scroll_up(20),
             KeyCode::Char('g') | KeyCode::Home => {
