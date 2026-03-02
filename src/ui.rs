@@ -287,7 +287,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     let search_nav_hint = if !app.view().search.matches.is_empty() {
-        "  [n]ext-match  [p]rev-match  [Esc]clear-search"
+        "  [n]ext-match  [N]prev-match  [Esc]clear-search"
     } else {
         ""
     };
@@ -298,9 +298,9 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             (
                 format!("NORMAL{}", running),
                 format!(
-                    "[q]uit  [e/Enter]edit  [a]new  [d]el  [Tab/←/→]switch  \
-                     [1]stdout  [2]stderr  [3]combined  [s]ave  [r]erun  \
-                     [/]search  [j/k/PgDn/PgUp/gg/G]scroll  [?/:h]help{}",
+                    "[q]uit  [i]edit  [o]new  [x/Del]del  [h/l/←/→]switch  \
+                     [m]cycle output  [s]ave  [r]erun  \
+                     [/]search  [?/:h]help{}",
                     search_nav_hint
                 ),
             )
@@ -561,21 +561,21 @@ fn render_confirm_delete_overlay(frame: &mut Frame, app: &App, area: Rect) {
 /// Render a simple list of keybindings for the help overlay.
 pub fn render_help(frame: &mut Frame, area: Rect) {
     let items: Vec<ListItem> = vec![
-        ListItem::new("Tab / → / l    Next stage"),
-        ListItem::new("Shift+Tab / ← / h  Previous stage"),
-        ListItem::new("e / Enter      Edit current stage command"),
-        ListItem::new("a / n          Add new stage (n only when no search active)"),
-        ListItem::new("d              Delete current stage"),
+        ListItem::new("→ / l          Next stage"),
+        ListItem::new("← / h          Previous stage"),
+        ListItem::new("i              Edit current stage command"),
+        ListItem::new("o              Add new stage"),
+        ListItem::new("x / Delete     Delete current stage"),
         ListItem::new("r              Re-run (bypass cache)"),
         ListItem::new("s              Save output to file"),
-        ListItem::new("1              Show stdout"),
-        ListItem::new("2              Show stderr"),
-        ListItem::new("3              Show combined (stdout+stderr)"),
+        ListItem::new("m/1/2/3        Switch between stdout/stderr/combined views"),
         ListItem::new("/              Start search (regex, \\c=ignore case, \\C=match case)"),
-        ListItem::new("n / p          Next / previous search match"),
+        ListItem::new("n / N          Next / previous search match"),
         ListItem::new("Esc            Clear search highlights"),
         ListItem::new("j / ↓          Scroll down"),
         ListItem::new("k / ↑          Scroll up"),
+        ListItem::new("Ctrl+d / Ctrl+u  Half-page down/up"),
+        ListItem::new("Ctrl+f / Ctrl+b  Full page down/up"),
         ListItem::new("PgDn / Ctrl+f  Page down"),
         ListItem::new("PgUp / Ctrl+b  Page up"),
         ListItem::new("g / Home       Go to top"),
