@@ -24,7 +24,7 @@ fn style_with_highlight(base: AnsiStyleState, highlight: HighlightKind) -> Style
     let style = base.as_style();
     match highlight {
         HighlightKind::None => style,
-        HighlightKind::Other => style.fg(Color::Black).bg(Color::Rgb(180, 140, 30)),
+        HighlightKind::Other => style.fg(Color::Black).bg(Color::Gray),
         HighlightKind::Current => style
             .fg(Color::Black)
             .bg(Color::Yellow)
