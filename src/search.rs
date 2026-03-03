@@ -27,17 +27,18 @@ impl SearchState {
     /// `\c` anywhere in the pattern → case-insensitive; `\C` → case-sensitive (default).
     pub fn parse_vim_pattern(query: &str) -> (String, bool) {
         let mut pattern = query.to_string();
-        let case_insensitive;
+        let contains_upper_case_char = pattern.chars().any(|c| c.is_ascii_uppercase());
+        let case_sensitive: bool;
         if pattern.contains("\\c") {
-            case_insensitive = true;
+            case_sensitive = false;
             pattern = pattern.replace("\\c", "");
         } else if pattern.contains("\\C") {
-            case_insensitive = false;
+            case_sensitive = true;
             pattern = pattern.replace("\\C", "");
         } else {
-            case_insensitive = false;
+            case_sensitive = contains_upper_case_char;
         }
-        (pattern, case_insensitive)
+        (pattern, case_sensitive)
     }
 
     /// Recompute matches against `content` using the current `query`.
@@ -48,12 +49,12 @@ impl SearchState {
         if self.query.is_empty() {
             return;
         }
-        let (pattern, case_insensitive) = Self::parse_vim_pattern(&self.query);
+        let (pattern, case_sensitive) = Self::parse_vim_pattern(&self.query);
         if pattern.is_empty() {
             return;
         }
         let re = match RegexBuilder::new(&pattern)
-            .case_insensitive(case_insensitive)
+            .case_insensitive(!case_sensitive)
             .build()
         {
             Ok(r) => r,
