@@ -43,7 +43,7 @@ pub fn render(frame: &mut Frame, app: &App) {
 /// Render the pipeline stages bar at the top.
 fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
     if app.pipeline.is_empty() {
-        let msg = Paragraph::new("No stages — press 'n' to add a new stage")
+        let msg = Paragraph::new("No stages — press 'o' to add a new stage")
             .style(Style::default().fg(Color::DarkGray))
             .block(Block::default().borders(Borders::ALL).title(" Pipeline "));
         frame.render_widget(msg, area);
