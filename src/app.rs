@@ -162,6 +162,14 @@ pub struct App {
     pub running: bool,
     /// Show help overlay?
     pub show_help: bool,
+    /// The most recently confirmed search query (used to resume search with `n`/`N`).
+    pub last_search_query: String,
+    /// Ordered history of confirmed search queries (oldest first).
+    pub search_history: Vec<String>,
+    /// Current position in `search_history` while browsing (None = editing a fresh query).
+    pub search_history_idx: Option<usize>,
+    /// Draft query saved when the user starts browsing history.
+    pub search_draft: String,
     /// The executor cache.
     cache: ExecutorCache,
     /// Sender for triggering background execution.
@@ -238,6 +246,10 @@ impl App {
             error_message: None,
             running: false,
             show_help: false,
+            last_search_query: String::new(),
+            search_history: Vec::new(),
+            search_history_idx: None,
+            search_draft: String::new(),
             cache: ExecutorCache::new(),
             exec_tx,
             exec_rx,
@@ -392,10 +404,29 @@ impl App {
 
     /// Confirm the search query and compute matches.
     pub fn confirm_search(&mut self) {
+        let query = self.view().search.query.clone();
+        if !query.is_empty() {
+            // Add to history, avoiding consecutive duplicates.
+            if self.search_history.last().map(|s| s.as_str()) != Some(query.as_str()) {
+                self.search_history.push(query.clone());
+            }
+            self.last_search_query = query;
+        }
+        self.search_history_idx = None;
+        self.search_draft.clear();
         self.compute_search_matches();
         self.mode = AppMode::Normal;
-        // Scroll to the first match if any.
-        let first_line = self.view().search.matches.first().map(|&(line, _, _)| line);
+        // Scroll to the first match at or after the current scroll position;
+        // wrap around to the very first match if none found after the cursor.
+        let current_scroll = self.view().scroll;
+        let first_line = self
+            .view()
+            .search
+            .matches
+            .iter()
+            .find(|&&(line, _, _)| line >= current_scroll)
+            .or_else(|| self.view().search.matches.first())
+            .map(|&(line, _, _)| line);
         if let Some(line) = first_line {
             self.view_mut().scroll = line;
         }
@@ -404,11 +435,22 @@ impl App {
     /// Cancel search and clear all highlights.
     pub fn cancel_search(&mut self) {
         self.view_mut().search.clear();
+        self.search_history_idx = None;
+        self.search_draft.clear();
         self.mode = AppMode::Normal;
     }
 
     /// Advance to the next search match.
     pub fn search_next(&mut self) {
+        // If no active matches but a previous query exists, restore it.
+        if self.view().search.matches.is_empty() && !self.last_search_query.is_empty() {
+            let query = self.last_search_query.clone();
+            let len = query.len();
+            let view = self.view_mut();
+            view.search.query = query;
+            view.search.cursor = len;
+            self.compute_search_matches();
+        }
         let view = self.view_mut();
         if view.search.matches.is_empty() {
             return;
@@ -420,6 +462,15 @@ impl App {
 
     /// Go back to the previous search match.
     pub fn search_prev(&mut self) {
+        // If no active matches but a previous query exists, restore it.
+        if self.view().search.matches.is_empty() && !self.last_search_query.is_empty() {
+            let query = self.last_search_query.clone();
+            let len = query.len();
+            let view = self.view_mut();
+            view.search.query = query;
+            view.search.cursor = len;
+            self.compute_search_matches();
+        }
         let view = self.view_mut();
         if view.search.matches.is_empty() {
             return;
@@ -738,6 +789,51 @@ impl App {
         match key.code {
             KeyCode::Esc => self.cancel_search(),
             KeyCode::Enter => self.confirm_search(),
+            KeyCode::Up => {
+                // Navigate to an older history entry.
+                if self.search_history.is_empty() {
+                    return false;
+                }
+                let new_idx = match self.search_history_idx {
+                    None => {
+                        // Save the current draft before browsing.
+                        self.search_draft = self.view().search.query.clone();
+                        self.search_history.len() - 1
+                    }
+                    Some(0) => 0, // already at the oldest entry
+                    Some(n) => n - 1,
+                };
+                self.search_history_idx = Some(new_idx);
+                let entry = self.search_history[new_idx].clone();
+                let len = entry.len();
+                let view = self.view_mut();
+                view.search.query = entry;
+                view.search.cursor = len;
+            }
+            KeyCode::Down => {
+                // Navigate to a newer history entry, or back to the draft.
+                match self.search_history_idx {
+                    None => {} // already at the draft, nothing to do
+                    Some(n) if n + 1 >= self.search_history.len() => {
+                        // Return to the saved draft.
+                        self.search_history_idx = None;
+                        let draft = self.search_draft.clone();
+                        let len = draft.len();
+                        let view = self.view_mut();
+                        view.search.query = draft;
+                        view.search.cursor = len;
+                    }
+                    Some(n) => {
+                        let new_idx = n + 1;
+                        self.search_history_idx = Some(new_idx);
+                        let entry = self.search_history[new_idx].clone();
+                        let len = entry.len();
+                        let view = self.view_mut();
+                        view.search.query = entry;
+                        view.search.cursor = len;
+                    }
+                }
+            }
             KeyCode::Backspace => {
                 let view = self.view_mut();
                 if view.search.cursor > 0 {
@@ -1131,5 +1227,238 @@ mod tests {
         // Error exit code of stage 1 must be preserved.
         assert_eq!(app.stage_outputs[1].exit_code, Some(1));
         assert_eq!(app.stage_outputs.len(), 3);
+    }
+
+    // --- Issue 17: Resume search with `n` ---
+
+    /// Helper: set up an App with one stage whose output is the given text.
+    #[tokio::test]
+    async fn test_resume_search_with_n_after_cancel() {
+        let pipeline = parse_pipeline("echo hello");
+        let mut app = App::new(pipeline);
+        app.stage_outputs = vec![make_stage_output("hello\nworld\nhello\n")];
+
+        // Enter search mode, type a query, confirm it.
+        app.start_search();
+        app.view_mut().search.query = "hello".to_string();
+        app.view_mut().search.cursor = 5;
+        app.confirm_search();
+
+        // There should be matches and last_search_query should be set.
+        assert_eq!(app.last_search_query, "hello");
+        assert!(!app.view().search.matches.is_empty());
+
+        // Cancel the search: this clears the query and matches.
+        app.cancel_search();
+        assert!(app.view().search.query.is_empty());
+        assert!(app.view().search.matches.is_empty());
+
+        // Pressing `n` should resume the previous query.
+        app.search_next();
+        assert_eq!(app.view().search.query, "hello");
+        assert!(!app.view().search.matches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_resume_search_with_shift_n_after_cancel() {
+        let pipeline = parse_pipeline("echo hello");
+        let mut app = App::new(pipeline);
+        app.stage_outputs = vec![make_stage_output("hello\nworld\nhello\n")];
+
+        app.start_search();
+        app.view_mut().search.query = "hello".to_string();
+        app.view_mut().search.cursor = 5;
+        app.confirm_search();
+
+        app.cancel_search();
+
+        // Pressing `N` (search_prev) should also resume the previous query.
+        app.search_prev();
+        assert_eq!(app.view().search.query, "hello");
+        assert!(!app.view().search.matches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_search_next_does_nothing_without_last_query() {
+        let pipeline = parse_pipeline("echo hello");
+        let mut app = App::new(pipeline);
+        app.stage_outputs = vec![make_stage_output("hello\n")];
+
+        // No prior search at all: pressing `n` should be a no-op.
+        let scroll_before = app.view().scroll;
+        app.search_next();
+        assert_eq!(app.view().scroll, scroll_before);
+        assert!(app.view().search.matches.is_empty());
+    }
+
+    // --- Issue 18: Search from where you are ---
+
+    #[tokio::test]
+    async fn test_confirm_search_starts_from_current_scroll() {
+        let pipeline = parse_pipeline("echo hello");
+        let mut app = App::new(pipeline);
+        // 5 lines; matches on lines 0 and 3
+        app.stage_outputs = vec![make_stage_output(
+            "hello\nline1\nline2\nhello\nline4\n",
+        )];
+
+        // Scroll to line 2 before searching.
+        app.view_mut().scroll = 2;
+        app.start_search();
+        app.view_mut().search.query = "hello".to_string();
+        app.view_mut().search.cursor = 5;
+        app.confirm_search();
+
+        // The first match after line 2 is line 3; we should jump there.
+        assert_eq!(app.view().scroll, 3);
+    }
+
+    #[tokio::test]
+    async fn test_confirm_search_wraps_to_first_match() {
+        let pipeline = parse_pipeline("echo hello");
+        let mut app = App::new(pipeline);
+        // Match only on line 0; current scroll is past it.
+        app.stage_outputs = vec![make_stage_output("hello\nline1\nline2\n")];
+
+        app.view_mut().scroll = 2;
+        app.start_search();
+        app.view_mut().search.query = "hello".to_string();
+        app.view_mut().search.cursor = 5;
+        app.confirm_search();
+
+        // No match after line 2 → wrap to line 0.
+        assert_eq!(app.view().scroll, 0);
+    }
+
+    // --- Issue 19: Search history ---
+
+    #[tokio::test]
+    async fn test_confirm_search_adds_to_history() {
+        let pipeline = parse_pipeline("echo hello");
+        let mut app = App::new(pipeline);
+        app.stage_outputs = vec![make_stage_output("hello\n")];
+
+        app.start_search();
+        app.view_mut().search.query = "hello".to_string();
+        app.view_mut().search.cursor = 5;
+        app.confirm_search();
+
+        assert_eq!(app.search_history, vec!["hello"]);
+    }
+
+    #[tokio::test]
+    async fn test_confirm_search_no_duplicate_consecutive_history() {
+        let pipeline = parse_pipeline("echo hello");
+        let mut app = App::new(pipeline);
+        app.stage_outputs = vec![make_stage_output("hello\n")];
+
+        for _ in 0..3 {
+            app.start_search();
+            app.view_mut().search.query = "hello".to_string();
+            app.view_mut().search.cursor = 5;
+            app.confirm_search();
+        }
+
+        // Consecutive duplicates should not be added.
+        assert_eq!(app.search_history, vec!["hello"]);
+    }
+
+    #[tokio::test]
+    async fn test_search_history_navigation_up_down() {
+        let pipeline = parse_pipeline("echo hello");
+        let mut app = App::new(pipeline);
+        app.stage_outputs = vec![make_stage_output("hello world\n")];
+
+        // Add two history entries.
+        app.start_search();
+        app.view_mut().search.query = "hello".to_string();
+        app.view_mut().search.cursor = 5;
+        app.confirm_search();
+
+        app.start_search();
+        app.view_mut().search.query = "world".to_string();
+        app.view_mut().search.cursor = 5;
+        app.confirm_search();
+
+        assert_eq!(app.search_history, vec!["hello", "world"]);
+
+        // Enter search mode and navigate Up to get the most recent history entry.
+        app.start_search();
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)));
+        assert_eq!(app.view().search.query, "world");
+        assert_eq!(app.search_history_idx, Some(1));
+
+        // Up again → older entry.
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)));
+        assert_eq!(app.view().search.query, "hello");
+        assert_eq!(app.search_history_idx, Some(0));
+
+        // Up at the oldest entry stays at oldest.
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)));
+        assert_eq!(app.view().search.query, "hello");
+        assert_eq!(app.search_history_idx, Some(0));
+
+        // Down → back to "world".
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        assert_eq!(app.view().search.query, "world");
+        assert_eq!(app.search_history_idx, Some(1));
+
+        // Down again → back to draft (empty, since we started fresh).
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        assert_eq!(app.view().search.query, "");
+        assert_eq!(app.search_history_idx, None);
+    }
+
+    #[tokio::test]
+    async fn test_search_history_draft_preserved() {
+        let pipeline = parse_pipeline("echo hello");
+        let mut app = App::new(pipeline);
+        app.stage_outputs = vec![make_stage_output("hello world\n")];
+
+        // Add a history entry.
+        app.start_search();
+        app.view_mut().search.query = "hello".to_string();
+        app.view_mut().search.cursor = 5;
+        app.confirm_search();
+
+        // Enter a partial new query, then browse history.
+        app.start_search();
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('w'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.view().search.query, "w");
+
+        // Up → should save draft "w" and load history entry.
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)));
+        assert_eq!(app.view().search.query, "hello");
+        assert_eq!(app.search_draft, "w");
+
+        // Down → should restore draft "w".
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        assert_eq!(app.view().search.query, "w");
+        assert_eq!(app.search_history_idx, None);
+    }
+
+    #[tokio::test]
+    async fn test_cancel_search_resets_history_navigation() {
+        let pipeline = parse_pipeline("echo hello");
+        let mut app = App::new(pipeline);
+        app.stage_outputs = vec![make_stage_output("hello\n")];
+
+        app.start_search();
+        app.view_mut().search.query = "hello".to_string();
+        app.view_mut().search.cursor = 5;
+        app.confirm_search();
+
+        // Browse history, then cancel.
+        app.start_search();
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)));
+        assert!(app.search_history_idx.is_some());
+        app.cancel_search();
+
+        // After cancel, history navigation state is reset.
+        assert_eq!(app.search_history_idx, None);
+        assert!(app.search_draft.is_empty());
     }
 }
