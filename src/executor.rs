@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 
 use crate::ansi::strip_ansi_sgr_bytes;
 
+
 /// A single chunk captured from either stdout or stderr of a child process,
 /// representing one line of output (including the trailing `\n`, if any).
 #[derive(Debug, Clone)]
@@ -44,6 +45,16 @@ impl StageOutput {
         self.stdout.iter().filter(|&&b| b == b'\n').count()
             + if self.stdout.last() != Some(&b'\n') { 1 } else { 0 }
     }
+
+    /// Create an empty `StageOutput` with no output and unknown exit code.
+    pub fn empty() -> Self {
+        Self {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            exit_code: None,
+            combined: Vec::new(),
+        }
+    }
 }
 
 /// Cache key: (command_string, sha256 of stdin bytes).
@@ -66,7 +77,23 @@ impl ExecutorCache {
 
     /// Run a shell command with the given stdin bytes.
     /// Returns a cached result if available; otherwise executes and caches.
+    #[allow(dead_code)]
     pub fn run(&mut self, command: &str, stdin: &[u8], force: bool) -> anyhow::Result<StageOutput> {
+        self.run_streaming(command, stdin, force, &mut |_| {})
+    }
+
+    /// Like [`run`], but calls `on_line` for every output line as it arrives.
+    ///
+    /// For cached results the callback is **not** invoked (the output is already complete).
+    /// For live executions each [`CombinedLine`] is forwarded to `on_line` as it is produced,
+    /// giving the caller a chance to update the UI incrementally.
+    pub fn run_streaming(
+        &mut self,
+        command: &str,
+        stdin: &[u8],
+        force: bool,
+        on_line: &mut impl FnMut(CombinedLine),
+    ) -> anyhow::Result<StageOutput> {
         let key = CacheKey {
             command: command.to_string(),
             stdin_hash: sha256(stdin),
@@ -78,7 +105,7 @@ impl ExecutorCache {
             }
         }
 
-        let output = run_shell_command(command, stdin)?;
+        let output = run_shell_command(command, stdin, on_line)?;
         self.cache.insert(key, output.clone());
         Ok(output)
     }
@@ -133,7 +160,11 @@ fn read_to_channel(mut reader: impl Read, is_stderr: bool, tx: std_mpsc::Sender<
     }
 }
 
-fn run_shell_command(command: &str, stdin_bytes: &[u8]) -> anyhow::Result<StageOutput> {
+fn run_shell_command(
+    command: &str,
+    stdin_bytes: &[u8],
+    on_line: &mut impl FnMut(CombinedLine),
+) -> anyhow::Result<StageOutput> {
     let mut child = Command::new("sh")
         .arg("-c")
         .arg(command)
@@ -178,13 +209,22 @@ fn run_shell_command(command: &str, stdin_bytes: &[u8]) -> anyhow::Result<StageO
         read_to_channel(stderr_pipe, true, tx_err);
     });
 
+    // Drain lines as they arrive.  `rx.iter()` blocks until *both* reader threads drop
+    // their senders (i.e. both stdout and stderr pipes reach EOF, which happens when the
+    // child process exits).  Each line is forwarded to the caller's `on_line` callback
+    // immediately so the UI can update incrementally without waiting for the process to
+    // finish.
+    let mut combined: Vec<CombinedLine> = Vec::new();
+    for line in rx.iter() {
+        on_line(line.clone());
+        combined.push(line);
+    }
+
+    // Both pipes are closed, so the child has already exited (or is about to).
     let status = child.wait()?;
     let _ = writer.join();
     let _ = stdout_thread.join();
     let _ = stderr_thread.join();
-
-    // Collect lines in the order they arrived (temporal interleaving).
-    let combined: Vec<CombinedLine> = rx.try_iter().collect();
 
     let stdout: Vec<u8> = combined
         .iter()
@@ -210,6 +250,7 @@ fn run_shell_command(command: &str, stdin_bytes: &[u8]) -> anyhow::Result<StageO
 ///
 /// `use_stderr_as_next_input[i]` – when `true`, the stderr of stage `i` is piped as stdin
 /// to stage `i+1` instead of stdout.  Missing entries default to `false` (use stdout).
+#[allow(dead_code)]
 pub fn execute_pipeline_stages(
     cache: &mut ExecutorCache,
     commands: &[String],
@@ -217,11 +258,29 @@ pub fn execute_pipeline_stages(
     force: bool,
     use_stderr_as_next_input: &[bool],
 ) -> anyhow::Result<Vec<StageOutput>> {
+    execute_pipeline_stages_streaming(cache, commands, up_to, force, use_stderr_as_next_input, |_, _| {})
+}
+
+/// Like [`execute_pipeline_stages`], but calls `on_line(stage_index, line)` for every output
+/// line produced by a live (non-cached) stage as it arrives.
+///
+/// This allows callers to update the UI incrementally while the pipeline is still running,
+/// rather than waiting for all stages to complete before displaying any output.
+pub fn execute_pipeline_stages_streaming(
+    cache: &mut ExecutorCache,
+    commands: &[String],
+    up_to: usize,
+    force: bool,
+    use_stderr_as_next_input: &[bool],
+    mut on_line: impl FnMut(usize, CombinedLine),
+) -> anyhow::Result<Vec<StageOutput>> {
     let mut outputs: Vec<StageOutput> = Vec::new();
     let mut stdin: Vec<u8> = Vec::new();
 
     for (i, cmd) in commands.iter().take(up_to + 1).enumerate() {
-        let out = cache.run(cmd, &stdin, force)?;
+        let out = cache.run_streaming(cmd, &stdin, force, &mut |line| {
+            on_line(i, line);
+        })?;
         let use_stderr = use_stderr_as_next_input.get(i).copied().unwrap_or(false);
         stdin = if use_stderr {
             strip_ansi_sgr_bytes(&out.stderr)
@@ -332,5 +391,72 @@ mod tests {
         let byte_count: u32 = outputs[1].stdout_str().trim().parse().unwrap();
         // "errline\n" is 8 bytes.
         assert_eq!(byte_count, 8);
+    }
+
+    #[test]
+    fn test_run_streaming_delivers_lines_incrementally() {
+        let mut cache = ExecutorCache::new();
+        let mut received: Vec<String> = Vec::new();
+        let out = cache
+            .run_streaming(
+                "printf 'line1\\nline2\\nline3\\n'",
+                b"",
+                false,
+                &mut |line| {
+                    received.push(String::from_utf8_lossy(&line.content).into_owned());
+                },
+            )
+            .unwrap();
+
+        // All three lines should have been delivered via the callback.
+        assert_eq!(received, vec!["line1\n", "line2\n", "line3\n"]);
+        // Final output is consistent with streamed data.
+        assert_eq!(out.stdout_str(), "line1\nline2\nline3\n");
+    }
+
+    #[test]
+    fn test_run_streaming_cached_does_not_invoke_callback() {
+        let mut cache = ExecutorCache::new();
+        // Prime the cache.
+        cache.run("echo cached_val", b"", false).unwrap();
+
+        let mut callback_count = 0usize;
+        let out = cache
+            .run_streaming("echo cached_val", b"", false, &mut |_| {
+                callback_count += 1;
+            })
+            .unwrap();
+
+        // Cache hit: callback must NOT be called (output is already complete).
+        assert_eq!(callback_count, 0);
+        assert_eq!(out.stdout_str().trim(), "cached_val");
+    }
+
+    #[test]
+    fn test_execute_pipeline_stages_streaming_delivers_lines() {
+        let mut cache = ExecutorCache::new();
+        let commands = vec![
+            "printf 'a\\nb\\n'".to_string(),
+            "cat".to_string(),
+        ];
+        let mut streamed: Vec<(usize, String)> = Vec::new();
+        let outputs = execute_pipeline_stages_streaming(
+            &mut cache,
+            &commands,
+            1,
+            false,
+            &[],
+            |stage, line| {
+                streamed.push((stage, String::from_utf8_lossy(&line.content).into_owned()));
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outputs.len(), 2);
+        // Both stages should have produced streaming lines.
+        assert!(streamed.iter().any(|(s, _)| *s == 0));
+        assert!(streamed.iter().any(|(s, _)| *s == 1));
+        // Final outputs match what was streamed.
+        assert_eq!(outputs[1].stdout_str(), "a\nb\n");
     }
 }

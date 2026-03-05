@@ -6,7 +6,7 @@ use futures::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc;
 
-use crate::executor::{ExecutorCache, StageOutput, execute_pipeline_stages};
+use crate::executor::{ExecutorCache, StageOutput, execute_pipeline_stages_streaming};
 use crate::pipeline::Pipeline;
 use crate::search::SearchState;
 use crate::ui;
@@ -142,6 +142,11 @@ pub enum AppMode {
 /// Messages sent from the background executor task to the main event loop.
 #[derive(Debug)]
 enum ExecMsg {
+    /// A single output line produced by a live stage, forwarded for incremental UI updates.
+    Line {
+        stage_index: usize,
+        line: crate::executor::CombinedLine,
+    },
     Done {
         outputs: Vec<StageOutput>,
         error: Option<String>,
@@ -168,6 +173,10 @@ pub struct App {
     exec_tx: mpsc::Sender<(Vec<String>, usize, bool, Vec<bool>)>,
     /// Receiver for execution results.
     exec_rx: mpsc::Receiver<ExecMsg>,
+    /// When `true`, `stage_outputs` will be cleared and scroll reset on the next
+    /// streamed line, so stale output from a previous run is not shown alongside
+    /// fresh partial output.
+    exec_pending_reset: bool,
 }
 
 /// Compute the new horizontal scroll offset so `before_cursor` (text before the cursor)
@@ -197,7 +206,8 @@ fn compute_editor_scroll(
 impl App {
     pub fn new(pipeline: Pipeline) -> Self {
         let (exec_tx, mut inner_rx) = mpsc::channel::<(Vec<String>, usize, bool, Vec<bool>)>(8);
-        let (inner_tx, exec_rx) = mpsc::channel::<ExecMsg>(8);
+        // Use a generous buffer so streaming lines don't stall the executor.
+        let (inner_tx, exec_rx) = mpsc::channel::<ExecMsg>(256);
 
         // Spawn a background task that runs commands and sends results back.
         // The actual execution uses spawn_blocking to avoid starving the
@@ -206,8 +216,21 @@ impl App {
             let mut cache = ExecutorCache::new();
             while let Some((commands, up_to, force, use_stderr)) = inner_rx.recv().await {
                 let mut c = cache;
+                let inner_tx_clone = inner_tx.clone();
                 let (result, returned_cache) = tokio::task::spawn_blocking(move || {
-                    let r = execute_pipeline_stages(&mut c, &commands, up_to, force, &use_stderr);
+                    let r = execute_pipeline_stages_streaming(
+                        &mut c,
+                        &commands,
+                        up_to,
+                        force,
+                        &use_stderr,
+                        |stage_index, line| {
+                            // blocking_send provides natural backpressure: if the receiver
+                            // hasn't consumed messages yet, we wait rather than drop lines.
+                            let _ = inner_tx_clone
+                                .blocking_send(ExecMsg::Line { stage_index, line });
+                        },
+                    );
                     (r, c)
                 })
                 .await
@@ -241,6 +264,7 @@ impl App {
             cache: ExecutorCache::new(),
             exec_tx,
             exec_rx,
+            exec_pending_reset: false,
         }
     }
 
@@ -264,6 +288,7 @@ impl App {
             .collect();
         let tx = self.exec_tx.clone();
         self.running = true;
+        self.exec_pending_reset = true;
         self.error_message = None;
         tokio::spawn(async move {
             let _ = tx.send((commands, up_to, force, use_stderr)).await;
@@ -273,15 +298,44 @@ impl App {
     /// Poll for any completed execution result. Returns true if the UI should redraw.
     pub fn poll_exec_result(&mut self) -> bool {
         match self.exec_rx.try_recv() {
+            Ok(ExecMsg::Line { stage_index, line }) => {
+                // On the first streaming line of a new execution, clear stale output and
+                // reset the scroll position so fresh content starts at the top.
+                if self.exec_pending_reset {
+                    self.stage_outputs.clear();
+                    self.view_mut().scroll = 0;
+                    self.exec_pending_reset = false;
+                }
+                // Grow stage_outputs to accommodate this stage if needed.
+                while self.stage_outputs.len() <= stage_index {
+                    self.stage_outputs.push(StageOutput::empty());
+                }
+                // Append the line to stdout/stderr byte buffers and the interleaved list.
+                let out = &mut self.stage_outputs[stage_index];
+                if line.is_stderr {
+                    out.stderr.extend_from_slice(&line.content);
+                } else {
+                    out.stdout.extend_from_slice(&line.content);
+                }
+                out.combined.push(line);
+                true
+            }
             Ok(ExecMsg::Done { outputs, error }) => {
                 self.running = false;
+                self.exec_pending_reset = false;
                 if let Some(err) = error {
                     self.error_message = Some(err);
                 } else {
+                    // Replace with the authoritative final outputs from the executor.
+                    // If we were streaming, the user may have already scrolled, so only
+                    // reset scroll when no streaming output was received (all-cached run).
+                    let was_streaming = !self.stage_outputs.is_empty();
                     self.stage_outputs = outputs;
                     self.error_message = None;
+                    if !was_streaming {
+                        self.view_mut().scroll = 0;
+                    }
                 }
-                self.view_mut().scroll = 0;
                 self.compute_search_matches();
                 true
             }
@@ -910,8 +964,17 @@ async fn run_inner(
     let mut event_stream = EventStream::new();
 
     loop {
-        // Poll for completed background execution
-        let exec_done = app.poll_exec_result();
+        // Drain all available execution results (streaming lines or done signal) before
+        // drawing.  A single `try_recv` per tick would cause sluggish updates when many
+        // lines arrive between renders.
+        let mut exec_updated = false;
+        loop {
+            if app.poll_exec_result() {
+                exec_updated = true;
+            } else {
+                break;
+            }
+        }
 
         // Keep editor horizontal scroll in sync with the cursor before drawing.
         if let Ok(size) = terminal.size() {
@@ -954,8 +1017,8 @@ async fn run_inner(
             }
         }
 
-        // If execution completed, redraw
-        if exec_done {
+        // If execution produced any updates, redraw
+        if exec_updated {
             terminal.draw(|frame| {
                 ui::render(frame, app);
                 if app.show_help {
