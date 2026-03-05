@@ -162,6 +162,8 @@ pub struct App {
     pub running: bool,
     /// Show help overlay?
     pub show_help: bool,
+    /// Number of visible lines in the output pane (updated each frame by the renderer).
+    pub visible_output_lines: usize,
     /// The executor cache.
     cache: ExecutorCache,
     /// Sender for triggering background execution.
@@ -238,6 +240,7 @@ impl App {
             error_message: None,
             running: false,
             show_help: false,
+            visible_output_lines: 0,
             cache: ExecutorCache::new(),
             exec_tx,
             exec_rx,
@@ -361,8 +364,12 @@ impl App {
     /// Scroll down by `n` lines.
     pub fn scroll_down(&mut self, n: usize) {
         let total = self.output_line_count();
+        // Use visible_output_lines when known (set by the renderer each frame).
+        // Fall back to 1 before the first render so the clamp stays at total - 1,
+        // matching the old behaviour during initialisation.
+        let max_scroll = total.saturating_sub(self.visible_output_lines.max(1));
         let scroll = &mut self.view_mut().scroll;
-        *scroll = (*scroll + n).min(total.saturating_sub(1));
+        *scroll = (*scroll + n).min(max_scroll);
     }
 
     /// Scroll up by `n` lines.
@@ -663,7 +670,8 @@ impl App {
             }
             KeyCode::Char('G') | KeyCode::End => {
                 let total = self.output_line_count();
-                self.view_mut().scroll = total.saturating_sub(1);
+                self.view_mut().scroll =
+                    total.saturating_sub(self.visible_output_lines.max(1));
             }
 
             // Search
@@ -1108,6 +1116,63 @@ mod tests {
         assert_eq!(app.pipeline.selected, 1);
         // Execution should have been triggered.
         assert!(app.running);
+    }
+
+    /// Pressing down past the end of output should not accumulate phantom scroll.
+    #[tokio::test]
+    async fn test_scroll_down_clamped_to_visible_height() {
+        let pipeline = parse_pipeline("echo a");
+        let mut app = App::new(pipeline);
+
+        // Simulate 10 lines of output and a visible height of 3.
+        app.stage_outputs = vec![make_stage_output("1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n")];
+        app.visible_output_lines = 3;
+
+        // Max useful scroll = total_lines - visible_height = 10 - 3 = 7.
+        // Scrolling down many more times should not push scroll beyond 7.
+        for _ in 0..20 {
+            app.scroll_down(1);
+        }
+        assert_eq!(app.view().scroll, 7, "scroll should be clamped to total - visible");
+    }
+
+    /// After reaching the bottom, pressing up once should immediately move the view.
+    #[tokio::test]
+    async fn test_scroll_up_after_bottom_has_no_hysteresis() {
+        let pipeline = parse_pipeline("echo a");
+        let mut app = App::new(pipeline);
+
+        app.stage_outputs = vec![make_stage_output("1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n")];
+        app.visible_output_lines = 3;
+
+        // Scroll all the way to the bottom.
+        for _ in 0..20 {
+            app.scroll_down(1);
+        }
+        let bottom = app.view().scroll;
+        assert_eq!(bottom, 7, "should be at the real bottom");
+
+        // A single scroll_up should move away from bottom immediately.
+        app.scroll_up(1);
+        assert_eq!(app.view().scroll, 6, "one up from bottom should reach 6");
+    }
+
+    /// The G/End key should jump to the correct bottom position (no hysteresis).
+    #[tokio::test]
+    async fn test_g_key_jumps_to_correct_bottom() {
+        let pipeline = parse_pipeline("echo a");
+        let mut app = App::new(pipeline);
+
+        app.stage_outputs = vec![make_stage_output("1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n")];
+        app.visible_output_lines = 3;
+
+        // Press G (jump to bottom).
+        app.handle_event(make_key(KeyCode::Char('G')));
+        assert_eq!(app.view().scroll, 7, "G should set scroll to total - visible");
+
+        // One up should immediately change scroll.
+        app.handle_event(make_key(KeyCode::Char('k')));
+        assert_eq!(app.view().scroll, 6, "k after G should reach 6");
     }
 
     /// Error status of downstream stages is preserved when navigating left.

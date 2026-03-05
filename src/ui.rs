@@ -15,7 +15,7 @@ pub const EDITOR_DIALOG_MAX_WIDTH: u16 = 120;
 pub const SAVE_DIALOG_MAX_WIDTH: u16 = 60;
 
 /// Render the full TUI.
-pub fn render(frame: &mut Frame, app: &App) {
+pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
     // Split: stages bar (top), output (middle), status bar (bottom)
@@ -132,7 +132,13 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Render the output pager area.
-fn render_output(frame: &mut Frame, app: &App, area: Rect) {
+fn render_output(frame: &mut Frame, app: &mut App, area: Rect) {
+    // Update the visible output line count so that scroll_down and G/End can clamp
+    // correctly. The output block uses Borders::ALL, which takes 1 row on each side
+    // (top border + bottom border = 2 rows total).
+    const BORDER_ROWS: u16 = 2;
+    app.visible_output_lines = area.height.saturating_sub(BORDER_ROWS) as usize;
+
     let exit_info = if !app.stage_outputs.is_empty() {
         let idx = app
             .pipeline
