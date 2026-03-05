@@ -227,8 +227,10 @@ impl App {
                         |stage_index, line| {
                             // blocking_send provides natural backpressure: if the receiver
                             // hasn't consumed messages yet, we wait rather than drop lines.
+                            // If the channel is closed (app is quitting) we simply stop
+                            // forwarding; the executor will finish on its own.
                             let _ = inner_tx_clone
-                                .blocking_send(ExecMsg::Line { stage_index, line });
+                                .blocking_send(ExecMsg::Line { stage_index, line: line.clone() });
                         },
                     );
                     (r, c)
@@ -327,12 +329,13 @@ impl App {
                     self.error_message = Some(err);
                 } else {
                     // Replace with the authoritative final outputs from the executor.
-                    // If we were streaming, the user may have already scrolled, so only
-                    // reset scroll when no streaming output was received (all-cached run).
-                    let was_streaming = !self.stage_outputs.is_empty();
+                    // If output was already accumulated via streaming, the user may have
+                    // scrolled; preserve that position.  Only reset scroll on all-cached runs
+                    // where no streaming lines were received.
+                    let has_accumulated_output = !self.stage_outputs.is_empty();
                     self.stage_outputs = outputs;
                     self.error_message = None;
-                    if !was_streaming {
+                    if !has_accumulated_output {
                         self.view_mut().scroll = 0;
                     }
                 }

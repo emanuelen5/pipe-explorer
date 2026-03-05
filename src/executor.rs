@@ -7,7 +7,6 @@ use sha2::{Digest, Sha256};
 
 use crate::ansi::strip_ansi_sgr_bytes;
 
-
 /// A single chunk captured from either stdout or stderr of a child process,
 /// representing one line of output (including the trailing `\n`, if any).
 #[derive(Debug, Clone)]
@@ -92,7 +91,7 @@ impl ExecutorCache {
         command: &str,
         stdin: &[u8],
         force: bool,
-        on_line: &mut impl FnMut(CombinedLine),
+        on_line: &mut impl FnMut(&CombinedLine),
     ) -> anyhow::Result<StageOutput> {
         let key = CacheKey {
             command: command.to_string(),
@@ -163,7 +162,7 @@ fn read_to_channel(mut reader: impl Read, is_stderr: bool, tx: std_mpsc::Sender<
 fn run_shell_command(
     command: &str,
     stdin_bytes: &[u8],
-    on_line: &mut impl FnMut(CombinedLine),
+    on_line: &mut impl FnMut(&CombinedLine),
 ) -> anyhow::Result<StageOutput> {
     let mut child = Command::new("sh")
         .arg("-c")
@@ -216,7 +215,7 @@ fn run_shell_command(
     // finish.
     let mut combined: Vec<CombinedLine> = Vec::new();
     for line in rx.iter() {
-        on_line(line.clone());
+        on_line(&line);
         combined.push(line);
     }
 
@@ -272,7 +271,7 @@ pub fn execute_pipeline_stages_streaming(
     up_to: usize,
     force: bool,
     use_stderr_as_next_input: &[bool],
-    mut on_line: impl FnMut(usize, CombinedLine),
+    mut on_line: impl FnMut(usize, &CombinedLine),
 ) -> anyhow::Result<Vec<StageOutput>> {
     let mut outputs: Vec<StageOutput> = Vec::new();
     let mut stdin: Vec<u8> = Vec::new();
