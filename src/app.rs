@@ -384,6 +384,24 @@ impl App {
         self.view_mut().search.compute(&content);
     }
 
+    /// Change the output mode for the current stage and invalidate downstream cached
+    /// outputs so that following stages recalculate with the newly selected input stream.
+    ///
+    /// Downstream stages are invalidated by truncating `stage_outputs` to include only
+    /// up to and including the current stage.  When the user navigates right, those
+    /// stages will re-execute and may use the executor's cache if the effective stdin
+    /// bytes are unchanged.
+    pub fn set_output_mode(&mut self, mode: OutputMode) {
+        let selected = self.pipeline.selected;
+        self.view_mut().output_mode = mode;
+        self.view_mut().scroll = 0;
+        self.compute_search_matches();
+        // Invalidate outputs of all stages that come after the current one so they
+        // will be re-executed (with potentially different stdin) the next time the
+        // user navigates to them.
+        self.stage_outputs.truncate(selected + 1);
+    }
+
     /// Enter search mode, clearing any previous query.
     pub fn start_search(&mut self) {
         self.view_mut().search.clear();
@@ -613,28 +631,21 @@ impl App {
 
             // Output mode
             KeyCode::Char('m') => {
-                match self.view().output_mode {
-                    OutputMode::Stdout => self.view_mut().output_mode = OutputMode::Stderr,
-                    OutputMode::Stderr => self.view_mut().output_mode = OutputMode::Combined,
-                    OutputMode::Combined => self.view_mut().output_mode = OutputMode::Stdout,
-                }
-                self.view_mut().scroll = 0;
-                self.compute_search_matches();
+                let next_mode = match self.view().output_mode {
+                    OutputMode::Stdout => OutputMode::Stderr,
+                    OutputMode::Stderr => OutputMode::Combined,
+                    OutputMode::Combined => OutputMode::Stdout,
+                };
+                self.set_output_mode(next_mode);
             }
             KeyCode::Char('1') => {
-                self.view_mut().output_mode = OutputMode::Stdout;
-                self.view_mut().scroll = 0;
-                self.compute_search_matches();
+                self.set_output_mode(OutputMode::Stdout);
             }
             KeyCode::Char('2') => {
-                self.view_mut().output_mode = OutputMode::Stderr;
-                self.view_mut().scroll = 0;
-                self.compute_search_matches();
+                self.set_output_mode(OutputMode::Stderr);
             }
             KeyCode::Char('3') => {
-                self.view_mut().output_mode = OutputMode::Combined;
-                self.view_mut().scroll = 0;
-                self.compute_search_matches();
+                self.set_output_mode(OutputMode::Combined);
             }
 
             // Pager scrolling
@@ -1131,5 +1142,71 @@ mod tests {
         // Error exit code of stage 1 must be preserved.
         assert_eq!(app.stage_outputs[1].exit_code, Some(1));
         assert_eq!(app.stage_outputs.len(), 3);
+    }
+
+    /// Changing output mode on stage 0 invalidates downstream stage_outputs so that
+    /// following stages will recalculate with the newly selected input stream.
+    #[tokio::test]
+    async fn test_set_output_mode_invalidates_downstream_outputs() {
+        let pipeline = parse_pipeline("echo a | echo b | echo c");
+        let mut app = App::new(pipeline);
+
+        // All three stages have been executed.
+        app.stage_outputs = vec![
+            make_stage_output("a\n"),
+            make_stage_output("b\n"),
+            make_stage_output("c\n"),
+        ];
+        app.pipeline.selected = 0;
+
+        // Change mode on stage 0 → should invalidate stages 1 and 2.
+        app.set_output_mode(OutputMode::Stderr);
+
+        assert_eq!(app.stage_views[0].output_mode, OutputMode::Stderr);
+        // Only stage 0's output remains; downstream outputs are purged.
+        assert_eq!(app.stage_outputs.len(), 1);
+    }
+
+    /// After changing output mode, navigating right triggers re-execution of
+    /// the now-invalidated downstream stage.
+    #[tokio::test]
+    async fn test_output_mode_change_causes_downstream_reexec_on_navigate() {
+        let pipeline = parse_pipeline("echo a | echo b");
+        let mut app = App::new(pipeline);
+
+        app.stage_outputs = vec![
+            make_stage_output("a\n"),
+            make_stage_output("b\n"),
+        ];
+        app.pipeline.selected = 0;
+
+        // Change mode: stage 1's inputs might now differ.
+        app.set_output_mode(OutputMode::Stderr);
+
+        // Navigate right: stage 1 is no longer in stage_outputs → exec is triggered.
+        app.handle_event(make_key(KeyCode::Right));
+
+        assert_eq!(app.pipeline.selected, 1);
+        assert!(app.running, "execution must be triggered for the invalidated downstream stage");
+    }
+
+    /// Changing output mode on the last stage does not purge any outputs since
+    /// there are no downstream stages.
+    #[tokio::test]
+    async fn test_set_output_mode_on_last_stage_preserves_all_outputs() {
+        let pipeline = parse_pipeline("echo a | echo b");
+        let mut app = App::new(pipeline);
+
+        app.stage_outputs = vec![
+            make_stage_output("a\n"),
+            make_stage_output("b\n"),
+        ];
+        app.pipeline.selected = 1; // last stage
+
+        app.set_output_mode(OutputMode::Stderr);
+
+        // Both outputs must still be present because stage 1 is the last stage.
+        assert_eq!(app.stage_outputs.len(), 2);
+        assert_eq!(app.stage_views[1].output_mode, OutputMode::Stderr);
     }
 }
