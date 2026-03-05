@@ -107,3 +107,33 @@ jobs:
           name: pipe-explorer-${{ matrix.target }}
           path: ${{ env.ASSET }}
           if-no-files-found: error
+
+  release-nightly:
+    name: Release Nightly
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    steps:
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Delete existing nightly release and tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release delete nightly --yes --cleanup-tag --repo "${{ github.repository }}" 2>/dev/null || true
+
+      - name: Create nightly release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create nightly \
+            --repo "${{ github.repository }}" \
+            --prerelease \
+            --title "Nightly Build" \
+            --notes "Automated nightly build from commit ${{ github.sha }} on \`main\`." \
+            artifacts/*
