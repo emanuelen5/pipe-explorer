@@ -91,14 +91,21 @@ mod tests {
     fn test_parse_vim_pattern_case_insensitive() {
         let (pat, ci) = SearchState::parse_vim_pattern("hello\\c");
         assert_eq!(pat, "hello");
-        assert!(ci);
+        assert!(!ci);
     }
 
     #[test]
     fn test_parse_vim_pattern_explicit_case_sensitive() {
         let (pat, ci) = SearchState::parse_vim_pattern("hello\\C");
         assert_eq!(pat, "hello");
-        assert!(!ci);
+        assert!(ci);
+    }
+
+    #[test]
+    fn test_parse_vim_pattern_case_sensitive_due_to_uppercase() {
+        let (pat, ci) = SearchState::parse_vim_pattern("Hello");
+        assert_eq!(pat, "Hello");
+        assert!(ci);
     }
 
     #[test]
