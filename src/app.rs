@@ -553,7 +553,7 @@ impl App {
             }
 
             // Editing
-            KeyCode::Char('i') => {
+            KeyCode::Char('e') => {
                 if !self.pipeline.is_empty() {
                     self.start_editing();
                 }
@@ -580,8 +580,11 @@ impl App {
                 self.search_prev();
             }
 
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.scroll_down(20)
+            }
             // Delete stage
-            KeyCode::Char('x') | KeyCode::Delete => {
+            KeyCode::Char('d') | KeyCode::Delete => {
                 if !self.pipeline.is_empty() {
                     let is_last = self.pipeline.selected == self.pipeline.len() - 1;
                     if is_last || self.pipeline.len() == 1 {
@@ -650,9 +653,6 @@ impl App {
                 if key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 self.scroll_up(20);
-            }
-            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.scroll_down(20)
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.scroll_up(20)

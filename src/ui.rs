@@ -298,7 +298,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             (
                 format!("NORMAL{}", running),
                 format!(
-                    "[q]uit  [i]edit  [o]new  [x/Del]del  [h/l/←/→]switch  \
+                    "[q]uit  [e]edit  [o]new  [d/Del] [h/l/←/→]switch  \
                      [m]cycle output  [s]ave  [r]erun  \
                      [/]search  [?/:h]help{}",
                     search_nav_hint
@@ -563,9 +563,9 @@ pub fn render_help(frame: &mut Frame, area: Rect) {
     let items: Vec<ListItem> = vec![
         ListItem::new("→ / l          Next stage"),
         ListItem::new("← / h          Previous stage"),
-        ListItem::new("i              Edit current stage command"),
+        ListItem::new("e              Edit current stage command"),
         ListItem::new("o              Add new stage"),
-        ListItem::new("x / Delete     Delete current stage"),
+        ListItem::new("d / Delete     Delete current stage"),
         ListItem::new("r              Re-run (bypass cache)"),
         ListItem::new("s              Save output to file"),
         ListItem::new("m/1/2/3        Switch between stdout/stderr/combined views"),
