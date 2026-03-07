@@ -158,12 +158,12 @@ impl StageOutput {
         &self.stderr_text
     }
 
-    #[allow(dead_code)] // used by tests
+    #[cfg(test)]
     pub fn stdout_str(&self) -> String {
         self.stdout_text.clone()
     }
 
-    #[allow(dead_code)] // used by tests
+    #[cfg(test)]
     pub fn stderr_str(&self) -> String {
         self.stderr_text.clone()
     }
@@ -244,7 +244,7 @@ impl ExecutorCache {
 
     /// Run a shell command with the given stdin bytes.
     /// Returns a cached result if available; otherwise executes and caches.
-    #[allow(dead_code)] // used by tests only
+    #[cfg(test)]
     pub fn run(&mut self, command: &str, stdin: &[u8], force: bool) -> anyhow::Result<StageOutput> {
         let key = CacheKey {
             command: command.to_string(),
@@ -280,21 +280,7 @@ impl ExecutorCache {
         self.cache.insert(key, output);
     }
 
-    /// Invalidate cached entry for a given command and stdin.
-    #[allow(dead_code)]
-    pub fn invalidate(&mut self, command: &str, stdin: &[u8]) {
-        let key = CacheKey {
-            command: command.to_string(),
-            stdin_hash: sha256(stdin),
-        };
-        self.cache.remove(&key);
-    }
 
-    /// Clear all cached entries.
-    #[allow(dead_code)]
-    pub fn clear(&mut self) {
-        self.cache.clear();
-    }
 }
 
 fn sha256(data: &[u8]) -> Vec<u8> {
@@ -340,7 +326,7 @@ fn read_to_channel(mut reader: impl Read, is_stderr: bool, tx: std_mpsc::Sender<
     }
 }
 
-#[allow(dead_code)] // used by tests via ExecutorCache::run
+#[cfg(test)]
 fn run_shell_command(command: &str, stdin_bytes: &[u8]) -> anyhow::Result<StageOutput> {
     let mut child = Command::new("sh")
         .arg("-c")
@@ -418,7 +404,7 @@ fn run_shell_command(command: &str, stdin_bytes: &[u8]) -> anyhow::Result<StageO
 ///
 /// `output_modes[i]` controls which output of stage `i` is piped as stdin to
 /// stage `i+1`.
-#[allow(dead_code)] // used by tests only
+#[cfg(test)]
 pub fn execute_pipeline_stages(
     cache: &mut ExecutorCache,
     commands: &[String],
@@ -990,5 +976,118 @@ mod tests {
         assert_eq!(run1[1].stderr, run3[1].stderr);
         // run2 must differ from run1 (different input stream).
         assert_ne!(run1[1].stdout, run2[1].stdout);
+    }
+
+    // ---------------------------------------------------------------
+    // StageOutput::append_data tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn append_data_accumulates_stdout_bytes() {
+        let mut out = StageOutput::empty();
+        out.append_data(b"hello\n", b"", vec![]);
+        out.append_data(b"world\n", b"", vec![]);
+        assert_eq!(out.stdout, b"hello\nworld\n");
+        assert_eq!(out.stdout_text(), "hello\nworld\n");
+    }
+
+    #[test]
+    fn append_data_accumulates_stderr_bytes() {
+        let mut out = StageOutput::empty();
+        out.append_data(b"", b"err1\n", vec![]);
+        out.append_data(b"", b"err2\n", vec![]);
+        assert_eq!(out.stderr, b"err1\nerr2\n");
+        assert_eq!(out.stderr_text(), "err1\nerr2\n");
+    }
+
+    #[test]
+    fn append_data_increments_line_counts() {
+        let mut out = StageOutput::empty();
+        out.append_data(b"a\nb\n", b"e\n", vec![]);
+        assert_eq!(out.stdout_line_count(), 2);
+        assert_eq!(out.stderr_line_count(), 1);
+
+        out.append_data(b"c\n", b"", vec![]);
+        assert_eq!(out.stdout_line_count(), 3);
+    }
+
+    #[test]
+    fn append_data_display_line_count_includes_trailing() {
+        let mut out = StageOutput::empty();
+        out.append_data(b"line1\nline2\n", b"", vec![]);
+        // 2 newlines + trailing empty line = 3 display lines
+        assert_eq!(out.display_line_count(OutputMode::Stdout), 3);
+    }
+
+    #[test]
+    fn append_data_extends_line_index() {
+        let mut out = StageOutput::empty();
+        out.append_data(b"first\n", b"", vec![]);
+        let idx = out.line_index(OutputMode::Stdout).unwrap();
+        assert_eq!(idx.line_count(), 2); // line 0 + line 1
+
+        out.append_data(b"second\n", b"", vec![]);
+        let idx = out.line_index(OutputMode::Stdout).unwrap();
+        assert_eq!(idx.line_count(), 3); // line 0, 1, 2
+    }
+
+    #[test]
+    fn append_data_combined_interleaving() {
+        let mut out = StageOutput::empty();
+        let lines = vec![
+            CombinedLine { is_stderr: false, content: b"out\n".to_vec() },
+            CombinedLine { is_stderr: true, content: b"err\n".to_vec() },
+        ];
+        out.append_data(b"out\n", b"err\n", lines);
+        assert_eq!(out.combined.len(), 2);
+        assert!(!out.combined[0].is_stderr);
+        assert!(out.combined[1].is_stderr);
+        assert_eq!(out.display_line_count(OutputMode::Combined), 3);
+    }
+
+    #[test]
+    fn append_data_matches_new_from_scratch() {
+        // Building incrementally via append_data should produce the same
+        // line counts and text as building via StageOutput::new.
+        let stdout = b"hello\nworld\n";
+        let stderr = b"err\n";
+
+        let from_new = StageOutput::new(stdout.to_vec(), stderr.to_vec(), Some(0), vec![]);
+
+        let mut from_append = StageOutput::empty();
+        from_append.append_data(&stdout[..6], &stderr[..], vec![]);
+        from_append.append_data(&stdout[6..], b"", vec![]);
+
+        assert_eq!(from_append.stdout_text(), from_new.stdout_text());
+        assert_eq!(from_append.stderr_text(), from_new.stderr_text());
+        assert_eq!(from_append.stdout_line_count(), from_new.stdout_line_count());
+        assert_eq!(from_append.stderr_line_count(), from_new.stderr_line_count());
+        assert_eq!(
+            from_append.display_line_count(OutputMode::Stdout),
+            from_new.display_line_count(OutputMode::Stdout)
+        );
+    }
+
+    #[test]
+    fn append_data_with_ansi_preserves_style_in_index() {
+        let mut out = StageOutput::empty();
+        out.append_data(b"\x1b[31mred\n", b"", vec![]);
+        out.append_data(b"still\n", b"", vec![]);
+
+        let idx = out.line_index(OutputMode::Stdout).unwrap();
+        // Line 1 should inherit the red style from line 0's escape.
+        assert_eq!(idx.line_count(), 3); // lines 0, 1, 2
+        // Verify style carry-over by rendering line 1 and checking color.
+        let lines = crate::ansi::ansi_text_to_visible_lines(
+            out.stdout_text(), 1, 1, &std::collections::HashMap::new(), Some(idx),
+        );
+        assert!(!lines.is_empty());
+        assert!(lines[0].spans.iter().any(|s| s.style.fg == Some(ratatui::style::Color::Red)));
+    }
+
+    #[test]
+    fn no_line_index_for_combined_mode() {
+        let out = StageOutput::empty();
+        assert!(out.line_index(OutputMode::Combined).is_none());
     }
 }

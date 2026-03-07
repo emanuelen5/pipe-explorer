@@ -597,16 +597,6 @@ impl App {
         }
     }
 
-    /// Return a shared reference to the active `EditorState`, if any.
-    #[allow(dead_code)]
-    pub fn editor(&self) -> Option<&EditorState> {
-        match &self.mode {
-            AppMode::Editing { editor, .. } => Some(editor),
-            AppMode::Saving(editor) => Some(editor),
-            _ => None,
-        }
-    }
-
     /// Return a mutable reference to the active `EditorState`, if any.
     pub fn editor_mut(&mut self) -> Option<&mut EditorState> {
         match &mut self.mode {
