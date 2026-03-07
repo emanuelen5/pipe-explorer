@@ -501,9 +501,18 @@ impl App {
     pub fn confirm_search(&mut self) {
         self.compute_search_matches();
         self.mode = AppMode::Normal;
-        // Scroll to the first match if any.
-        let first_line = self.view().search.matches.first().map(|&(line, _, _)| line);
-        if let Some(line) = first_line {
+        // Jump to the first match at or after the current scroll position,
+        // so the search starts from where the user is looking rather than
+        // from the top of the buffer.
+        let scroll = self.view().scroll;
+        let matches = &self.view().search.matches;
+        if !matches.is_empty() {
+            // matches is sorted by line — find first match with line >= scroll.
+            let idx = matches.partition_point(|&(line, _, _)| line < scroll);
+            // If no match at/after scroll, wrap to first match.
+            let idx = if idx >= matches.len() { 0 } else { idx };
+            self.view_mut().search.match_idx = idx;
+            let (line, _, _) = self.view().search.matches[idx];
             self.view_mut().scroll = line;
         }
     }
@@ -514,27 +523,69 @@ impl App {
         self.mode = AppMode::Normal;
     }
 
-    /// Advance to the next search match.
+    /// Advance to the next search match relative to the current scroll position.
+    ///
+    /// If the current match is still on the scroll line (user hasn't scrolled
+    /// away), simply step to `match_idx + 1` so that multiple matches on the
+    /// same line are visited one by one.  If the user has scrolled away, jump
+    /// to the first match *after* the current scroll position.
     pub fn search_next(&mut self) {
         let view = self.view_mut();
         if view.search.matches.is_empty() {
             return;
         }
-        view.search.match_idx = (view.search.match_idx + 1) % view.search.matches.len();
+        let scroll = view.scroll;
+        let cur_line = view.search.matches[view.search.match_idx].0;
+
+        if cur_line == scroll {
+            // Still on the same line as the current match — step sequentially.
+            view.search.match_idx = (view.search.match_idx + 1) % view.search.matches.len();
+        } else {
+            // User scrolled away — binary search for first match after scroll.
+            let idx = view
+                .search
+                .matches
+                .partition_point(|&(line, _, _)| line <= scroll);
+            view.search.match_idx = if idx < view.search.matches.len() {
+                idx
+            } else {
+                0 // wrap
+            };
+        }
         let (line, _, _) = view.search.matches[view.search.match_idx];
         view.scroll = line;
     }
 
-    /// Go back to the previous search match.
+    /// Go back to the previous search match relative to the current scroll position.
+    ///
+    /// Same logic as `search_next` but in reverse: sequential step when on
+    /// the current match's line, binary search when the user has scrolled away.
     pub fn search_prev(&mut self) {
         let view = self.view_mut();
         if view.search.matches.is_empty() {
             return;
         }
-        if view.search.match_idx == 0 {
-            view.search.match_idx = view.search.matches.len() - 1;
+        let scroll = view.scroll;
+        let cur_line = view.search.matches[view.search.match_idx].0;
+
+        if cur_line == scroll {
+            // Still on the same line — step sequentially backwards.
+            if view.search.match_idx == 0 {
+                view.search.match_idx = view.search.matches.len() - 1;
+            } else {
+                view.search.match_idx -= 1;
+            }
         } else {
-            view.search.match_idx -= 1;
+            // User scrolled away — find last match before scroll.
+            let idx = view
+                .search
+                .matches
+                .partition_point(|&(line, _, _)| line < scroll);
+            view.search.match_idx = if idx > 0 {
+                idx - 1
+            } else {
+                view.search.matches.len() - 1 // wrap
+            };
         }
         let (line, _, _) = view.search.matches[view.search.match_idx];
         view.scroll = line;
@@ -1360,5 +1411,186 @@ mod tests {
         app.handle_event(make_key(KeyCode::Char('m')));
         assert_eq!(app.stage_views[0].output_mode, OutputMode::Stderr);
         assert_eq!(app.stage_outputs.len(), 1);
+    }
+
+    // ---------------------------------------------------------------
+    // Search navigation tests
+    // ---------------------------------------------------------------
+
+    /// Helper: set up an app with pre-populated output and search matches.
+    /// Output has "aa" on lines 0, 2, 5, 5 (two matches on line 5), 8.
+    fn make_app_with_search() -> App {
+        let pipeline = parse_pipeline("echo test");
+        let mut app = App::new(pipeline);
+        // 10 lines of output; "aa" appears on lines 0, 2, 5 (twice), and 8.
+        let text = "aa\nbb\naa\ncc\ndd\naaXaa\nff\ngg\naa\nii\n";
+        app.stage_outputs = vec![make_stage_output(text)];
+        app.view_mut().search.query = "aa".to_string();
+        app.compute_search_matches();
+        // Matches should be: (0,0,2), (2,0,2), (5,0,2), (5,3,5), (8,0,2)
+        assert_eq!(app.view().search.matches.len(), 5);
+        app
+    }
+
+    #[tokio::test]
+    async fn test_confirm_search_starts_from_scroll_position() {
+        let pipeline = parse_pipeline("echo test");
+        let mut app = App::new(pipeline);
+        let text = "aa\nbb\naa\ncc\naa\n";
+        app.stage_outputs = vec![make_stage_output(text)];
+        // Scroll to line 2 before searching.
+        app.view_mut().scroll = 2;
+        app.view_mut().search.query = "aa".to_string();
+        app.confirm_search();
+        // Should land on the match at line 2 (index 1), not line 0.
+        assert_eq!(app.view().search.match_idx, 1);
+        assert_eq!(app.view().scroll, 2);
+    }
+
+    #[tokio::test]
+    async fn test_confirm_search_wraps_when_no_match_after_scroll() {
+        let pipeline = parse_pipeline("echo test");
+        let mut app = App::new(pipeline);
+        let text = "aa\nbb\ncc\n";
+        app.stage_outputs = vec![make_stage_output(text)];
+        // Scroll past all matches.
+        app.view_mut().scroll = 2;
+        app.view_mut().search.query = "aa".to_string();
+        app.confirm_search();
+        // Should wrap to match 0 at line 0.
+        assert_eq!(app.view().search.match_idx, 0);
+        assert_eq!(app.view().scroll, 0);
+    }
+
+    #[tokio::test]
+    async fn test_search_next_sequential_same_line() {
+        let mut app = make_app_with_search();
+        // Start at match 0 (line 0).
+        app.view_mut().search.match_idx = 0;
+        app.view_mut().scroll = 0;
+        // Step through matches sequentially.
+        app.search_next();
+        assert_eq!(app.view().search.match_idx, 1);
+        assert_eq!(app.view().scroll, 2);
+
+        // Advance to line 5 (first match there).
+        app.search_next();
+        assert_eq!(app.view().search.match_idx, 2);
+        assert_eq!(app.view().scroll, 5);
+
+        // Next: should land on the second match on line 5 (idx 3), NOT skip to line 8.
+        app.search_next();
+        assert_eq!(app.view().search.match_idx, 3);
+        assert_eq!(app.view().scroll, 5);
+
+        // Next: now move to line 8.
+        app.search_next();
+        assert_eq!(app.view().search.match_idx, 4);
+        assert_eq!(app.view().scroll, 8);
+    }
+
+    #[tokio::test]
+    async fn test_search_next_wraps_at_end() {
+        let mut app = make_app_with_search();
+        // Position on the last match.
+        app.view_mut().search.match_idx = 4;
+        app.view_mut().scroll = 8;
+        app.search_next();
+        assert_eq!(app.view().search.match_idx, 0);
+        assert_eq!(app.view().scroll, 0);
+    }
+
+    #[tokio::test]
+    async fn test_search_next_after_manual_scroll() {
+        let mut app = make_app_with_search();
+        // Currently on match 0 (line 0), user scrolls to line 4.
+        app.view_mut().search.match_idx = 0;
+        app.view_mut().scroll = 4;
+        // Press n: should jump to first match after line 4 → line 5 (match idx 2).
+        app.search_next();
+        assert_eq!(app.view().search.match_idx, 2);
+        assert_eq!(app.view().scroll, 5);
+    }
+
+    #[tokio::test]
+    async fn test_search_next_after_scroll_past_all_matches_wraps() {
+        let mut app = make_app_with_search();
+        app.view_mut().search.match_idx = 4;
+        app.view_mut().scroll = 9; // past all matches
+        app.search_next();
+        assert_eq!(app.view().search.match_idx, 0);
+        assert_eq!(app.view().scroll, 0);
+    }
+
+    #[tokio::test]
+    async fn test_search_prev_sequential_same_line() {
+        let mut app = make_app_with_search();
+        // Start at match 4 (line 8).
+        app.view_mut().search.match_idx = 4;
+        app.view_mut().scroll = 8;
+        app.search_prev();
+        assert_eq!(app.view().search.match_idx, 3);
+        assert_eq!(app.view().scroll, 5);
+
+        // Prev again: second match on line 5 → first match on line 5.
+        app.search_prev();
+        assert_eq!(app.view().search.match_idx, 2);
+        assert_eq!(app.view().scroll, 5);
+
+        // Prev again: line 2.
+        app.search_prev();
+        assert_eq!(app.view().search.match_idx, 1);
+        assert_eq!(app.view().scroll, 2);
+    }
+
+    #[tokio::test]
+    async fn test_search_prev_wraps_at_beginning() {
+        let mut app = make_app_with_search();
+        app.view_mut().search.match_idx = 0;
+        app.view_mut().scroll = 0;
+        app.search_prev();
+        assert_eq!(app.view().search.match_idx, 4);
+        assert_eq!(app.view().scroll, 8);
+    }
+
+    #[tokio::test]
+    async fn test_search_prev_after_manual_scroll() {
+        let mut app = make_app_with_search();
+        // Currently on match 4 (line 8), user scrolls to line 6.
+        app.view_mut().search.match_idx = 4;
+        app.view_mut().scroll = 6;
+        // Press N: should jump to last match before line 6 → line 5 match idx 3.
+        app.search_prev();
+        assert_eq!(app.view().search.match_idx, 3);
+        assert_eq!(app.view().scroll, 5);
+    }
+
+    #[tokio::test]
+    async fn test_search_prev_after_scroll_before_all_matches_wraps() {
+        let mut app = make_app_with_search();
+        // Current match is on line 5, user scrolls to line 0 (before match at line 0 uses <).
+        // Actually line 0 has a match, so let's say we manipulate match_idx to be on line 5
+        // but scroll to 0 — partition_point(line < 0) = 0 → wraps to last.
+        app.view_mut().search.match_idx = 2;
+        app.view_mut().scroll = 0;
+        // Since cur_line (5) != scroll (0), binary search kicks in.
+        // partition_point(line < 0) = 0 → wraps to last match.
+        app.search_prev();
+        assert_eq!(app.view().search.match_idx, 4);
+        assert_eq!(app.view().scroll, 8);
+    }
+
+    #[tokio::test]
+    async fn test_search_next_no_matches_is_noop() {
+        let pipeline = parse_pipeline("echo test");
+        let mut app = App::new(pipeline);
+        app.stage_outputs = vec![make_stage_output("no match here\n")];
+        app.view_mut().search.query = "zzz".to_string();
+        app.compute_search_matches();
+        assert!(app.view().search.matches.is_empty());
+        // Should not panic or change anything.
+        app.search_next();
+        app.search_prev();
+        assert_eq!(app.view().scroll, 0);
     }
 }
