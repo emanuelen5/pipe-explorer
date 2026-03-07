@@ -39,6 +39,9 @@ pub fn render(frame: &mut Frame, app: &App) {
         AppMode::ConfirmingDelete => render_confirm_delete_overlay(frame, app, area),
         _ => {}
     }
+    if app.show_help {
+        render_help(frame, frame.area());
+    }
 }
 
 /// Build the pipe connector string based on a stage's output mode.
@@ -646,7 +649,7 @@ fn render_confirm_delete_overlay(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Render a simple list of keybindings for the help overlay.
-pub fn render_help(frame: &mut Frame, area: Rect) {
+fn render_help(frame: &mut Frame, area: Rect) {
     let items: Vec<ListItem> = vec![
         ListItem::new("→ / l          Next stage"),
         ListItem::new("← / h          Previous stage"),

@@ -1071,9 +1071,6 @@ async fn run_inner(
 
             terminal.draw(|frame| {
                 ui::render(frame, app);
-                if app.show_help {
-                    ui::render_help(frame, frame.area());
-                }
             })?;
             dirty = false;
         }
