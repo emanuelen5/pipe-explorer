@@ -95,6 +95,9 @@ impl StageOutput {
     ///
     /// Line counts are updated incrementally (only the new bytes are scanned),
     /// avoiding the O(total) cost of rescanning the full buffer every update.
+    /// UTF-8 text caches are extended in-place when the new bytes are valid
+    /// UTF-8 (the common case), falling back to a full recompute only when a
+    /// multi-byte sequence is split across chunk boundaries.
     pub fn append_data(
         &mut self,
         new_stdout: &[u8],
@@ -115,9 +118,9 @@ impl StageOutput {
         self.stderr.extend_from_slice(new_stderr);
         self.combined.extend(new_combined);
 
-        // Recompute UTF-8 text caches (still full recompute for now).
-        self.stdout_text = String::from_utf8_lossy(&self.stdout).into_owned();
-        self.stderr_text = String::from_utf8_lossy(&self.stderr).into_owned();
+        // Incremental UTF-8 text caches.
+        append_text_incremental(&mut self.stdout_text, new_stdout, &self.stdout);
+        append_text_incremental(&mut self.stderr_text, new_stderr, &self.stderr);
     }
 
     /// Cached UTF-8 text for stdout (zero-cost borrow).
@@ -175,6 +178,23 @@ impl StageOutput {
             OutputMode::Combined => {
                 if self.combined.is_empty() { 0 } else { self.combined_newlines + 1 }
             }
+        }
+    }
+}
+
+/// Try to append `new_bytes` to `text` as UTF-8.  If the new chunk is valid
+/// UTF-8, it is pushed directly onto the existing `String` (zero-copy for the
+/// existing prefix).  If it is not (e.g. a multi-byte char was split across
+/// streaming chunks), the entire `full_buf` is re-decoded with lossy fallback.
+fn append_text_incremental(text: &mut String, new_bytes: &[u8], full_buf: &[u8]) {
+    if new_bytes.is_empty() {
+        return;
+    }
+    match std::str::from_utf8(new_bytes) {
+        Ok(s) => text.push_str(s),
+        Err(_) => {
+            // Rare: a multi-byte sequence straddles the chunk boundary.
+            *text = String::from_utf8_lossy(full_buf).into_owned();
         }
     }
 }
