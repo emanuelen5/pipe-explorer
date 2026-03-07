@@ -22,7 +22,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4), // Stages bar (2 content rows: counts + command)
+            Constraint::Length(3), // Stages bar
             Constraint::Min(0),    // Output pager
             Constraint::Length(1), // Status bar
         ])
@@ -51,7 +51,23 @@ pub fn pipe_connector(mode: OutputMode) -> &'static str {
     }
 }
 
+/// The redirect suffix appended to a command *before* the pipe, e.g. ` 2>&1`.
+/// Empty for stdout mode since no redirection is needed.
+fn redirect_suffix(mode: OutputMode) -> &'static str {
+    match mode {
+        OutputMode::Stdout => "",
+        OutputMode::Combined => " 2>&1",
+        OutputMode::Stderr => " 2>&1 >/dev/null",
+    }
+}
+
 /// Render the pipeline stages bar at the top as a single copyable command.
+///
+/// Each stage is rendered in its own `Block` with only top/bottom borders
+/// (no left/right), so the border lines flow continuously across stages.
+/// The top border title shows the line count, the bottom border title shows
+/// the stdout/stderr split, and the content row holds the command text plus
+/// the trailing pipe connector — forming one continuous, copyable command.
 fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
     if app.pipeline.is_empty() {
         let msg = Paragraph::new("No stages — press 'o' to add a new stage")
@@ -61,64 +77,29 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    // --- Build the selected-stage detail for the bottom title ---
     let selected = app.pipeline.selected;
-    let sel_output = app.stage_outputs.get(selected);
-    let sel_exit = sel_output.and_then(|o| o.exit_code);
-    let sel_error = matches!(sel_exit, Some(code) if code != 0);
-
-    let sel_stdout = sel_output.map(|o| o.stdout_line_count()).unwrap_or(0);
-    let sel_stderr = sel_output.map(|o| o.stderr_line_count()).unwrap_or(0);
-    let sel_mode = app
-        .stage_views
-        .get(selected)
-        .map(|v| v.output_mode)
-        .unwrap_or(OutputMode::Stdout);
-    let detail_label = match sel_mode {
-        OutputMode::Stdout => format!("{}/[{}]", sel_stdout, sel_stderr),
-        OutputMode::Stderr => format!("[{}]/{}", sel_stdout, sel_stderr),
-        OutputMode::Combined => {
-            format!("{}+{}={}", sel_stdout, sel_stderr, sel_stdout + sel_stderr)
-        }
-    };
-
-    let any_error = app
-        .stage_outputs
-        .iter()
-        .any(|o| matches!(o.exit_code, Some(c) if c != 0));
-    let block_style = if sel_error {
-        Style::default().fg(Color::Red)
-    } else {
-        Style::default()
-    };
-    let title = if any_error {
-        " Pipeline ✗ "
-    } else {
-        " Pipeline "
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .title_bottom(
-            ratatui::text::Line::from(format!(" {} ", detail_label)).alignment(Alignment::Right),
-        )
-        .style(block_style);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    // --- Line 1: per-stage line counts, aligned above each command segment ---
-    // --- Line 2: pure copyable bash command ---
-    let mut count_spans: Vec<Span> = Vec::new();
-    let mut cmd_spans: Vec<Span> = Vec::new();
     let n = app.pipeline.len();
 
-    for (i, stage) in app.pipeline.stages.iter().enumerate() {
-        let is_selected = i == selected;
+    // Compute the minimum width each stage needs, accounting for titles.
+    // We pre-compute the labels so we can measure them before building blocks.
+    struct StageInfo<'a> {
+        redirect: &'a str, // e.g. " 2>&1" — appended to the command inside the block
+        cmd_text: &'a str,
+        top_label: String,
+        bottom_label: String,
+    }
 
+    let mut infos: Vec<StageInfo> = Vec::with_capacity(n);
+    for (i, stage) in app.pipeline.stages.iter().enumerate() {
         let cmd_text = if stage.command.is_empty() {
             "<empty>"
         } else {
             &stage.command
+        };
+        let redirect = if i + 1 < n {
+            redirect_suffix(mode_for_stage(app, i))
+        } else {
+            ""
         };
 
         let stage_output = app.stage_outputs.get(i);
@@ -126,7 +107,6 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
         let stage_error = matches!(stage_exit, Some(code) if code != 0);
         let stage_mode = mode_for_stage(app, i);
 
-        // Compute the line count label for this stage.
         let line_count = stage_output
             .map(|o| match stage_mode {
                 OutputMode::Stdout => o.stdout_line_count(),
@@ -134,32 +114,90 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
                 OutputMode::Combined => o.stdout_line_count() + o.stderr_line_count(),
             })
             .unwrap_or(0);
-        let error_mark = if stage_error { "✗" } else { "" };
-        let count_label = format!("{}{}", line_count, error_mark);
+        let error_mark = if stage_error { " ✗" } else { "" };
+        let top_label = format!(" {}{} ", line_count, error_mark);
 
-        // The connector that follows this command (empty for the last stage).
-        let connector = if i + 1 < n {
-            pipe_connector(stage_mode)
-        } else {
-            ""
+        let stdout_count = stage_output.map(|o| o.stdout_line_count()).unwrap_or(0);
+        let stderr_count = stage_output.map(|o| o.stderr_line_count()).unwrap_or(0);
+        let bottom_label = match stage_mode {
+            OutputMode::Stdout => format!(" {}/[{}] ", stdout_count, stderr_count),
+            OutputMode::Stderr => format!(" [{}]/{} ", stdout_count, stderr_count),
+            OutputMode::Combined => format!(
+                " {}+{}={} ",
+                stdout_count,
+                stderr_count,
+                stdout_count + stderr_count
+            ),
         };
 
-        // The segment width is command + connector; pad the count label to match.
-        let segment_width = cmd_text.len() + connector.len();
-        let padded_count = format!("{:<width$}", count_label, width = segment_width);
+        infos.push(StageInfo {
+            redirect,
+            cmd_text,
+            top_label,
+            bottom_label,
+        });
+    }
 
-        let count_style = if stage_error {
-            Style::default().fg(Color::Red)
+    // Width = max(command + redirect suffix, top title, bottom title).
+    let min_widths: Vec<u16> = infos
+        .iter()
+        .map(|info| {
+            let content_w = info.cmd_text.len() + info.redirect.len();
+            let top_w = info.top_label.len();
+            let bot_w = info.bottom_label.len();
+            content_w.max(top_w).max(bot_w) as u16
+        })
+        .collect();
+
+    // Build layout: [stage] [pipe] [stage] [pipe] ... [stage]
+    // Stages get equal shares (Min), pipe separators " | " get fixed 3-char width.
+    let mut constraints: Vec<Constraint> = Vec::with_capacity(2 * n - 1);
+    for (i, &w) in min_widths.iter().enumerate() {
+        constraints.push(Constraint::Min(w));
+        if i + 1 < n {
+            constraints.push(Constraint::Length(3)); // " | "
+        }
+    }
+    let all_areas = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(constraints)
+        .split(area);
+
+    for (i, _stage) in app.pipeline.stages.iter().enumerate() {
+        let is_selected = i == selected;
+        let stage_output = app.stage_outputs.get(i);
+        let stage_exit = stage_output.and_then(|o| o.exit_code);
+        let stage_error = matches!(stage_exit, Some(code) if code != 0);
+        let info = &infos[i];
+
+        // Stage area is at index i*2 (even positions); connectors at odd.
+        let stage_area = all_areas[i * 2];
+
+        // --- Border + title styling ---
+        let border_style = if is_selected && stage_error {
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
         } else if is_selected {
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD)
+        } else if stage_error {
+            Style::default().fg(Color::Red)
         } else {
             Style::default().fg(Color::DarkGray)
         };
-        count_spans.push(Span::styled(padded_count, count_style));
 
-        // Command span.
+        let block = Block::default()
+            .borders(Borders::TOP | Borders::BOTTOM)
+            .border_style(border_style)
+            .title(Span::styled(&info.top_label, border_style))
+            .title_bottom(Span::styled(&info.bottom_label, border_style));
+
+        // --- Content: command + redirect suffix (e.g. "echo hello 2>&1") ---
+        let cmd_text = if info.cmd_text.is_empty() {
+            "<empty>"
+        } else {
+            info.cmd_text
+        };
         let cmd_style = if is_selected && stage_error {
             Style::default()
                 .fg(Color::White)
@@ -175,20 +213,38 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             Style::default().fg(Color::White)
         };
-        cmd_spans.push(Span::styled(cmd_text.to_string(), cmd_style));
 
-        // Connector span on the command line.
-        if !connector.is_empty() {
-            cmd_spans.push(Span::styled(
-                connector,
+        let mut content_spans = vec![Span::styled(cmd_text, cmd_style)];
+        if !info.redirect.is_empty() {
+            content_spans.push(Span::styled(
+                info.redirect,
                 Style::default().fg(Color::DarkGray),
             ));
         }
-    }
 
-    let text = Text::from(vec![Line::from(count_spans), Line::from(cmd_spans)]);
-    let para = Paragraph::new(text);
-    frame.render_widget(para, inner);
+        let inner = block.inner(stage_area);
+        frame.render_widget(block, stage_area);
+        frame.render_widget(
+            Paragraph::new(Line::from(content_spans)).alignment(Alignment::Center),
+            inner,
+        );
+
+        // --- Render " | " pipe between this stage and the next ---
+        if i + 1 < n {
+            let conn_area = all_areas[i * 2 + 1];
+            // The pipe sits in the middle row (row 1 of the 3-row area).
+            let conn_inner = Rect {
+                x: conn_area.x,
+                y: conn_area.y + 1,
+                width: conn_area.width,
+                height: 1,
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled(" | ", Style::default().fg(Color::DarkGray))),
+                conn_inner,
+            );
+        }
+    }
 }
 
 /// Get the output mode for a given stage (used to determine the pipe connector).
