@@ -40,10 +40,16 @@ pub struct StageOutput {
     stdout_text: String,
     /// Cached UTF-8 text for stderr (kept in sync with `stderr` bytes).
     stderr_text: String,
+    /// Cached line counts (updated by `refresh_cache()`).
+    cached_stdout_lines: usize,
+    cached_stderr_lines: usize,
+    cached_stdout_display_lines: usize,
+    cached_stderr_display_lines: usize,
+    cached_combined_display_lines: usize,
 }
 
 impl StageOutput {
-    /// Create a new stage output, eagerly computing the UTF-8 text cache.
+    /// Create a new stage output, eagerly computing all caches.
     pub fn new(
         stdout: Vec<u8>,
         stderr: Vec<u8>,
@@ -52,6 +58,11 @@ impl StageOutput {
     ) -> Self {
         let stdout_text = String::from_utf8_lossy(&stdout).into_owned();
         let stderr_text = String::from_utf8_lossy(&stderr).into_owned();
+        let cached_stdout_lines = count_lines_bytes(&stdout);
+        let cached_stderr_lines = count_lines_bytes(&stderr);
+        let cached_stdout_display_lines = display_lines_bytes(&stdout);
+        let cached_stderr_display_lines = display_lines_bytes(&stderr);
+        let cached_combined_display_lines = combined_display_lines(&combined);
         Self {
             stdout,
             stderr,
@@ -59,6 +70,11 @@ impl StageOutput {
             combined,
             stdout_text,
             stderr_text,
+            cached_stdout_lines,
+            cached_stderr_lines,
+            cached_stdout_display_lines,
+            cached_stderr_display_lines,
+            cached_combined_display_lines,
         }
     }
 
@@ -71,14 +87,24 @@ impl StageOutput {
             combined: Vec::new(),
             stdout_text: String::new(),
             stderr_text: String::new(),
+            cached_stdout_lines: 0,
+            cached_stderr_lines: 0,
+            cached_stdout_display_lines: 0,
+            cached_stderr_display_lines: 0,
+            cached_combined_display_lines: 0,
         }
     }
 
-    /// Recompute the cached UTF-8 text from the raw byte buffers.
-    /// Call this after mutating `stdout` or `stderr` directly.
+    /// Recompute all caches from the raw byte buffers.
+    /// Call this after mutating `stdout`, `stderr`, or `combined` directly.
     pub fn refresh_text_cache(&mut self) {
         self.stdout_text = String::from_utf8_lossy(&self.stdout).into_owned();
         self.stderr_text = String::from_utf8_lossy(&self.stderr).into_owned();
+        self.cached_stdout_lines = count_lines_bytes(&self.stdout);
+        self.cached_stderr_lines = count_lines_bytes(&self.stderr);
+        self.cached_stdout_display_lines = display_lines_bytes(&self.stdout);
+        self.cached_stderr_display_lines = display_lines_bytes(&self.stderr);
+        self.cached_combined_display_lines = combined_display_lines(&self.combined);
     }
 
     /// Cached UTF-8 text for stdout (zero-cost borrow).
@@ -101,17 +127,17 @@ impl StageOutput {
         self.stderr_text.clone()
     }
 
-    /// Count the number of lines in stdout without allocating a full String.
+    /// Count the number of lines in stdout (O(1), cached).
     pub fn stdout_line_count(&self) -> usize {
-        count_lines_bytes(&self.stdout)
+        self.cached_stdout_lines
     }
 
-    /// Count the number of lines in stderr without allocating a full String.
+    /// Count the number of lines in stderr (O(1), cached).
     pub fn stderr_line_count(&self) -> usize {
-        count_lines_bytes(&self.stderr)
+        self.cached_stderr_lines
     }
 
-    /// Count the number of display lines for the given output mode.
+    /// Count the number of display lines for the given output mode (O(1), cached).
     ///
     /// This matches the number of `Line` items produced by the ANSI parser:
     /// each `\n` ends a line, and a non-empty trailing segment without `\n`
@@ -119,20 +145,9 @@ impl StageOutput {
     /// empty line.
     pub fn display_line_count(&self, mode: OutputMode) -> usize {
         match mode {
-            OutputMode::Stdout => display_lines_bytes(&self.stdout),
-            OutputMode::Stderr => display_lines_bytes(&self.stderr),
-            OutputMode::Combined => {
-                if self.combined.is_empty() {
-                    return 0;
-                }
-                let n: usize = self
-                    .combined
-                    .iter()
-                    .flat_map(|l| l.content.iter())
-                    .filter(|&&b| b == b'\n')
-                    .count();
-                n + 1
-            }
+            OutputMode::Stdout => self.cached_stdout_display_lines,
+            OutputMode::Stderr => self.cached_stderr_display_lines,
+            OutputMode::Combined => self.cached_combined_display_lines,
         }
     }
 }
@@ -155,6 +170,20 @@ fn display_lines_bytes(bytes: &[u8]) -> usize {
         return 0;
     }
     bytes.iter().filter(|&&b| b == b'\n').count() + 1
+}
+
+/// Count display lines for combined output (same rule as `display_lines_bytes`,
+/// applied across all `CombinedLine` chunks).
+fn combined_display_lines(combined: &[CombinedLine]) -> usize {
+    if combined.is_empty() {
+        return 0;
+    }
+    let n: usize = combined
+        .iter()
+        .flat_map(|l| l.content.iter())
+        .filter(|&&b| b == b'\n')
+        .count();
+    n + 1
 }
 
 /// Cache key: (command_string, sha256 of stdin bytes).
