@@ -1,5 +1,5 @@
-mod app;
 mod ansi;
+mod app;
 mod executor;
 mod pipeline;
 mod search;

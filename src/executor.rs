@@ -50,7 +50,11 @@ impl StageOutput {
             return 0;
         }
         self.stdout.iter().filter(|&&b| b == b'\n').count()
-            + if self.stdout.last() != Some(&b'\n') { 1 } else { 0 }
+            + if self.stdout.last() != Some(&b'\n') {
+                1
+            } else {
+                0
+            }
     }
 }
 
@@ -127,7 +131,13 @@ fn read_to_channel(mut reader: impl Read, is_stderr: bool, tx: std_mpsc::Sender<
                 pending.extend_from_slice(&buf[..n]);
                 while let Some(pos) = pending.iter().position(|&b| b == b'\n') {
                     let line: Vec<u8> = pending.drain(..=pos).collect();
-                    if tx.send(CombinedLine { is_stderr, content: line }).is_err() {
+                    if tx
+                        .send(CombinedLine {
+                            is_stderr,
+                            content: line,
+                        })
+                        .is_err()
+                    {
                         return;
                     }
                 }
@@ -137,7 +147,10 @@ fn read_to_channel(mut reader: impl Read, is_stderr: bool, tx: std_mpsc::Sender<
     }
     // Send any remaining bytes (last line without trailing \n).
     if !pending.is_empty() {
-        let _ = tx.send(CombinedLine { is_stderr, content: pending });
+        let _ = tx.send(CombinedLine {
+            is_stderr,
+            content: pending,
+        });
     }
 }
 
@@ -336,13 +349,11 @@ mod tests {
     fn test_execute_pipeline_stderr_as_next_input() {
         let mut cache = ExecutorCache::new();
         // Stage 0 prints to stderr; stage 1 counts bytes of its stdin.
-        let commands = vec![
-            "echo errline >&2".to_string(),
-            "wc -c".to_string(),
-        ];
+        let commands = vec!["echo errline >&2".to_string(), "wc -c".to_string()];
         // OutputMode::Stderr for stage 0 → stage 1 receives stderr of stage 0.
         let outputs =
-            execute_pipeline_stages(&mut cache, &commands, 1, false, &[OutputMode::Stderr]).unwrap();
+            execute_pipeline_stages(&mut cache, &commands, 1, false, &[OutputMode::Stderr])
+                .unwrap();
         assert_eq!(outputs.len(), 2);
         let byte_count: u32 = outputs[1].stdout_str().trim().parse().unwrap();
         // "errline\n" is 8 bytes.
@@ -363,28 +374,26 @@ mod tests {
         ];
 
         // Run with Stdout mode: stage 1 receives "stdout_data\n".
-        let out_a = execute_pipeline_stages(
-            &mut cache, &commands, 1, false, &[OutputMode::Stdout],
-        ).unwrap();
+        let out_a = execute_pipeline_stages(&mut cache, &commands, 1, false, &[OutputMode::Stdout])
+            .unwrap();
         assert_eq!(out_a[1].stdout_str().trim(), "stdout_data");
 
         // Run with Stderr mode: stage 1 receives "stderr_data\n".
-        let out_b = execute_pipeline_stages(
-            &mut cache, &commands, 1, false, &[OutputMode::Stderr],
-        ).unwrap();
+        let out_b = execute_pipeline_stages(&mut cache, &commands, 1, false, &[OutputMode::Stderr])
+            .unwrap();
         assert_eq!(out_b[1].stdout_str().trim(), "stderr_data");
 
         // Switch back to Stdout (force=false): should be a cache hit — same
         // result as the first run.
-        let out_a2 = execute_pipeline_stages(
-            &mut cache, &commands, 1, false, &[OutputMode::Stdout],
-        ).unwrap();
+        let out_a2 =
+            execute_pipeline_stages(&mut cache, &commands, 1, false, &[OutputMode::Stdout])
+                .unwrap();
         assert_eq!(out_a2[1].stdout, out_a[1].stdout);
 
         // Switch back to Stderr (force=false): cache hit — same as second run.
-        let out_b2 = execute_pipeline_stages(
-            &mut cache, &commands, 1, false, &[OutputMode::Stderr],
-        ).unwrap();
+        let out_b2 =
+            execute_pipeline_stages(&mut cache, &commands, 1, false, &[OutputMode::Stderr])
+                .unwrap();
         assert_eq!(out_b2[1].stdout, out_b[1].stdout);
     }
 
@@ -394,29 +403,23 @@ mod tests {
     #[test]
     fn test_combined_output_mode_pipes_both_streams() {
         let mut cache = ExecutorCache::new();
-        let commands = vec![
-            "echo out; echo err >&2".to_string(),
-            "wc -l".to_string(),
-        ];
+        let commands = vec!["echo out; echo err >&2".to_string(), "wc -l".to_string()];
 
         // Stdout mode: 1 line ("out\n").
-        let out = execute_pipeline_stages(
-            &mut cache, &commands, 1, false, &[OutputMode::Stdout],
-        ).unwrap();
+        let out = execute_pipeline_stages(&mut cache, &commands, 1, false, &[OutputMode::Stdout])
+            .unwrap();
         let lines_stdout: u32 = out[1].stdout_str().trim().parse().unwrap();
         assert_eq!(lines_stdout, 1);
 
         // Stderr mode: 1 line ("err\n").
-        let out = execute_pipeline_stages(
-            &mut cache, &commands, 1, false, &[OutputMode::Stderr],
-        ).unwrap();
+        let out = execute_pipeline_stages(&mut cache, &commands, 1, false, &[OutputMode::Stderr])
+            .unwrap();
         let lines_stderr: u32 = out[1].stdout_str().trim().parse().unwrap();
         assert_eq!(lines_stderr, 1);
 
         // Combined mode: 2 lines ("out\n" + "err\n").
-        let out = execute_pipeline_stages(
-            &mut cache, &commands, 1, false, &[OutputMode::Combined],
-        ).unwrap();
+        let out = execute_pipeline_stages(&mut cache, &commands, 1, false, &[OutputMode::Combined])
+            .unwrap();
         let lines_combined: u32 = out[1].stdout_str().trim().parse().unwrap();
         assert_eq!(lines_combined, 2);
     }
@@ -437,19 +440,16 @@ mod tests {
         ];
 
         // First run: Stdout.
-        let run1 = execute_pipeline_stages(
-            &mut cache, &commands, 1, false, &[OutputMode::Stdout],
-        ).unwrap();
+        let run1 = execute_pipeline_stages(&mut cache, &commands, 1, false, &[OutputMode::Stdout])
+            .unwrap();
 
         // Second run: Stderr (different stdin → different cache key).
-        let run2 = execute_pipeline_stages(
-            &mut cache, &commands, 1, false, &[OutputMode::Stderr],
-        ).unwrap();
+        let run2 = execute_pipeline_stages(&mut cache, &commands, 1, false, &[OutputMode::Stderr])
+            .unwrap();
 
         // Third run: Stdout again (force=false → must be served from cache).
-        let run3 = execute_pipeline_stages(
-            &mut cache, &commands, 1, false, &[OutputMode::Stdout],
-        ).unwrap();
+        let run3 = execute_pipeline_stages(&mut cache, &commands, 1, false, &[OutputMode::Stdout])
+            .unwrap();
 
         // run1 and run3 must be byte-identical (cache hit).
         assert_eq!(run1[1].stdout, run3[1].stdout);

@@ -38,7 +38,8 @@ pub fn render(frame: &mut Frame, app: &App) {
         AppMode::Saving(_) => render_save_overlay(frame, app, area),
         AppMode::ConfirmingDelete => render_confirm_delete_overlay(frame, app, area),
         _ => {}
-    }}
+    }
+}
 
 /// Render the pipeline stages bar at the top.
 fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
@@ -170,12 +171,7 @@ fn render_output(frame: &mut Frame, app: &App, area: Rect) {
         String::new()
     };
 
-    let title = format!(
-        " Output ({}) — {}{} ",
-        mode_label,
-        exit_info,
-        search_info,
-    );
+    let title = format!(" Output ({}) — {}{} ", mode_label, exit_info, search_info,);
 
     let block = Block::default().borders(Borders::ALL).title(title);
     let inner = block.inner(area);
@@ -598,4 +594,3 @@ pub fn render_help(frame: &mut Frame, area: Rect) {
     );
     frame.render_widget(list, help_area);
 }
-

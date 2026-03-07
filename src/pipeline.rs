@@ -146,7 +146,9 @@ mod tests {
 
     #[test]
     fn test_parse_pipeline_ignores_pipe_inside_single_quotes() {
-        let p = parse_pipeline("gh api repos/emanuelen5/pipe-explorer/commits | jq '.[] | (.sha, .commit.verification.verified)'");
+        let p = parse_pipeline(
+            "gh api repos/emanuelen5/pipe-explorer/commits | jq '.[] | (.sha, .commit.verification.verified)'",
+        );
         assert_eq!(p.stages.len(), 2);
         assert_eq!(
             p.stages[0].command,
