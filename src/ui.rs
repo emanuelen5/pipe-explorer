@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 
-use crate::ansi::{ansi_text_to_lines, ansi_text_to_lines_with_highlights};
+use crate::ansi::{ansi_text_to_visible_lines};
 use crate::app::{App, AppMode, OutputMode};
 
 /// Maximum width (columns) of the command editor overlay dialog.
@@ -77,13 +77,13 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
         let stdout_count = app
             .stage_outputs
             .get(i)
-            .map(|o| o.stdout_str().lines().count())
+            .map(|o| o.stdout_line_count())
             .unwrap_or(0);
 
         let stderr_count = app
             .stage_outputs
             .get(i)
-            .map(|o| o.stderr_str().lines().count())
+            .map(|o| o.stderr_line_count())
             .unwrap_or(0);
 
         let stage_view = app.stage_views.get(i);
@@ -197,21 +197,36 @@ fn render_output(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let has_matches = !view.search.matches.is_empty();
-    let mut lines: Vec<Line> = if has_matches {
-        let mut line_match_map: std::collections::HashMap<usize, Vec<(usize, usize, bool)>> =
+    // Use the efficient byte-level line count (no String allocation).
+    let total_lines = app.output_line_count();
+    let visible_height = inner.height as usize;
+    let scroll = view.scroll.min(total_lines.saturating_sub(visible_height));
+
+    // Build search highlight map (only entries in the visible window matter,
+    // but we provide the full map — the windowed parser skips invisible lines).
+    let line_match_map = if !view.search.matches.is_empty() {
+        let mut map: std::collections::HashMap<usize, Vec<(usize, usize, bool)>> =
             std::collections::HashMap::new();
         for (idx, &(line, start, end)) in view.search.matches.iter().enumerate() {
             let is_current = idx == view.search.match_idx;
-            line_match_map
-                .entry(line)
+            map.entry(line)
                 .or_default()
                 .push((start, end, is_current));
         }
-        ansi_text_to_lines_with_highlights(&raw_content, &line_match_map)
+        map
     } else {
-        ansi_text_to_lines(&raw_content)
+        std::collections::HashMap::new()
     };
+
+    // Only parse visible lines — skip ANSI content before `scroll`, stop
+    // after `visible_height` lines.  This is the key performance win for
+    // large outputs.
+    let mut lines = ansi_text_to_visible_lines(
+        &raw_content,
+        scroll,
+        visible_height,
+        &line_match_map,
+    );
 
     // In combined mode, prepend a 1-column margin indicating the source stream:
     // a yellow "│" for stderr lines, a space for stdout lines.
@@ -220,7 +235,9 @@ fn render_output(frame: &mut Frame, app: &App, area: Rect) {
     let stderr_map = app.combined_stderr_map();
     if !matches!(app.view().output_mode, OutputMode::Combined) {
         for (i, line) in lines.iter_mut().enumerate() {
-            let is_stderr = stderr_map.get(i).copied().unwrap_or(false);
+            // Map from visible index back to the absolute line index.
+            let abs_i = scroll + i;
+            let is_stderr = stderr_map.get(abs_i).copied().unwrap_or(false);
             if is_stderr {
                 for span in &mut line.spans {
                     if span.style.bg.is_none() {
@@ -237,13 +254,8 @@ fn render_output(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    let total_lines = lines.len();
-    let visible_height = inner.height as usize;
-    let scroll = view.scroll.min(total_lines.saturating_sub(visible_height));
-
     let text = Text::from(lines);
     let para = Paragraph::new(text)
-        .scroll((scroll as u16, 0))
         .wrap(Wrap { trim: false });
     frame.render_widget(para, inner);
 

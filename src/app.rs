@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
@@ -397,9 +398,12 @@ impl App {
     }
 
     /// Return the text to display in the output pager.
-    pub fn current_output_text(&self) -> String {
+    ///
+    /// Returns a `Cow<str>` to avoid allocating when possible (stdout/stderr
+    /// are borrowed directly from the byte buffers when they're valid UTF-8).
+    pub fn current_output_text(&self) -> Cow<'_, str> {
         if self.pipeline.is_empty() || self.stage_outputs.is_empty() {
-            return String::new();
+            return Cow::Borrowed("");
         }
         let idx = self
             .pipeline
@@ -407,13 +411,15 @@ impl App {
             .min(self.stage_outputs.len().saturating_sub(1));
         let out = &self.stage_outputs[idx];
         match self.view().output_mode {
-            OutputMode::Stdout => out.stdout_str(),
-            OutputMode::Stderr => out.stderr_str(),
-            OutputMode::Combined => out
-                .combined
-                .iter()
-                .map(|l| String::from_utf8_lossy(&l.content).into_owned())
-                .collect(),
+            OutputMode::Stdout => String::from_utf8_lossy(&out.stdout),
+            OutputMode::Stderr => String::from_utf8_lossy(&out.stderr),
+            OutputMode::Combined => Cow::Owned(
+                out.combined
+                    .iter()
+                    .map(|l| String::from_utf8_lossy(&l.content))
+                    .collect::<Vec<_>>()
+                    .concat(),
+            ),
         }
     }
 
@@ -435,9 +441,16 @@ impl App {
             .collect()
     }
 
-    /// Number of lines in current output.
+    /// Number of display lines in current output (zero-allocation).
     pub fn output_line_count(&self) -> usize {
-        self.current_output_text().lines().count()
+        if self.pipeline.is_empty() || self.stage_outputs.is_empty() {
+            return 0;
+        }
+        let idx = self
+            .pipeline
+            .selected
+            .min(self.stage_outputs.len().saturating_sub(1));
+        self.stage_outputs[idx].display_line_count(self.view().output_mode)
     }
 
     /// Scroll down by `n` lines.

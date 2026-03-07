@@ -49,26 +49,70 @@ impl StageOutput {
         }
     }
 
+    #[allow(dead_code)] // used by tests
     pub fn stdout_str(&self) -> String {
         String::from_utf8_lossy(&self.stdout).into_owned()
     }
 
+    #[allow(dead_code)] // used by tests
     pub fn stderr_str(&self) -> String {
         String::from_utf8_lossy(&self.stderr).into_owned()
     }
 
     /// Count the number of lines in stdout without allocating a full String.
     pub fn stdout_line_count(&self) -> usize {
-        if self.stdout.is_empty() {
-            return 0;
-        }
-        self.stdout.iter().filter(|&&b| b == b'\n').count()
-            + if self.stdout.last() != Some(&b'\n') {
-                1
-            } else {
-                0
-            }
+        count_lines_bytes(&self.stdout)
     }
+
+    /// Count the number of lines in stderr without allocating a full String.
+    pub fn stderr_line_count(&self) -> usize {
+        count_lines_bytes(&self.stderr)
+    }
+
+    /// Count the number of display lines for the given output mode.
+    ///
+    /// This matches the number of `Line` items produced by the ANSI parser:
+    /// each `\n` ends a line, and a non-empty trailing segment without `\n`
+    /// counts as one more line — but a trailing `\n` also produces an extra
+    /// empty line.
+    pub fn display_line_count(&self, mode: OutputMode) -> usize {
+        match mode {
+            OutputMode::Stdout => display_lines_bytes(&self.stdout),
+            OutputMode::Stderr => display_lines_bytes(&self.stderr),
+            OutputMode::Combined => {
+                if self.combined.is_empty() {
+                    return 0;
+                }
+                let n: usize = self
+                    .combined
+                    .iter()
+                    .flat_map(|l| l.content.iter())
+                    .filter(|&&b| b == b'\n')
+                    .count();
+                n + 1
+            }
+        }
+    }
+}
+
+/// Count lines the way `.lines().count()` does: newline-terminated segments,
+/// ignoring a trailing empty line.
+fn count_lines_bytes(bytes: &[u8]) -> usize {
+    if bytes.is_empty() {
+        return 0;
+    }
+    bytes.iter().filter(|&&b| b == b'\n').count()
+        + if bytes.last() != Some(&b'\n') { 1 } else { 0 }
+}
+
+/// Count lines the way the ANSI parser produces them: every `\n` starts a new
+/// line, and a trailing `\n` produces an extra empty line.  This matches the
+/// `Vec<Line>` length returned by `ansi_text_to_lines`.
+fn display_lines_bytes(bytes: &[u8]) -> usize {
+    if bytes.is_empty() {
+        return 0;
+    }
+    bytes.iter().filter(|&&b| b == b'\n').count() + 1
 }
 
 /// Cache key: (command_string, sha256 of stdin bytes).

@@ -217,10 +217,30 @@ pub fn strip_ansi_sgr_bytes(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Flush the current text segment into a `Span` and push it onto `spans`.
+fn flush_segment(
+    segment: &mut String,
+    style: AnsiStyleState,
+    highlight: HighlightKind,
+    spans: &mut Vec<Span<'static>>,
+) {
+    if segment.is_empty() {
+        return;
+    }
+    let text = std::mem::take(segment);
+    if style.is_default() && highlight == HighlightKind::None {
+        spans.push(Span::raw(text));
+    } else {
+        spans.push(Span::styled(text, style_with_highlight(style, highlight)));
+    }
+}
+
+#[allow(dead_code)] // used by tests
 pub fn ansi_text_to_lines(text: &str) -> Vec<Line<'static>> {
     ansi_text_to_lines_with_highlights(text, &HashMap::new())
 }
 
+#[allow(dead_code)] // used by tests + ansi_text_to_lines
 pub fn ansi_text_to_lines_with_highlights(
     text: &str,
     highlights: &HashMap<usize, Vec<(usize, usize, bool)>>,
@@ -232,21 +252,6 @@ pub fn ansi_text_to_lines_with_highlights(
     let mut line_idx = 0usize;
     let mut plain_col = 0usize;
     let mut segment_style: Option<(AnsiStyleState, HighlightKind)> = None;
-
-    let flush_segment = |segment: &mut String,
-                         style: AnsiStyleState,
-                         highlight: HighlightKind,
-                         spans: &mut Vec<Span<'static>>| {
-        if segment.is_empty() {
-            return;
-        }
-        let text = std::mem::take(segment);
-        if style.is_default() && highlight == HighlightKind::None {
-            spans.push(Span::raw(text));
-        } else {
-            spans.push(Span::styled(text, style_with_highlight(style, highlight)));
-        }
-    };
 
     let bytes = text.as_bytes();
     let mut i = 0usize;
@@ -311,6 +316,110 @@ pub fn ansi_text_to_lines_with_highlights(
     flush_segment(&mut segment, seg_style, seg_highlight, &mut spans);
     if !spans.is_empty() || text.ends_with('\n') {
         lines.push(Line::from(spans));
+    }
+
+    lines
+}
+
+/// Parse only the visible window `[start_line, start_line + max_lines)` from
+/// ANSI-escaped text.
+///
+/// For lines before `start_line`, ANSI style state is tracked but no `Span`
+/// objects or `String` allocations are made.  Parsing stops as soon as the
+/// visible window is complete.
+pub fn ansi_text_to_visible_lines(
+    text: &str,
+    start_line: usize,
+    max_lines: usize,
+    highlights: &HashMap<usize, Vec<(usize, usize, bool)>>,
+) -> Vec<Line<'static>> {
+    let end_line = start_line + max_lines;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut segment = String::new();
+    let mut style = AnsiStyleState::default();
+    let mut line_idx = 0usize;
+    let mut plain_col = 0usize;
+    let mut segment_style: Option<(AnsiStyleState, HighlightKind)> = None;
+
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        // Past the visible window — stop.
+        if line_idx >= end_line {
+            break;
+        }
+
+        // Always parse ANSI escape sequences (style tracking is needed even
+        // before the visible window so colours carry over correctly).
+        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            let mut j = i + 2;
+            while j < bytes.len() {
+                if (bytes[j] as char).is_ascii_alphabetic() {
+                    break;
+                }
+                j += 1;
+            }
+
+            if j < bytes.len() {
+                let final_ch = bytes[j] as char;
+                if final_ch == 'm' {
+                    if line_idx >= start_line {
+                        let (ss, sh) =
+                            segment_style.unwrap_or((style, HighlightKind::None));
+                        flush_segment(&mut segment, ss, sh, &mut spans);
+                        segment_style = None;
+                    }
+                    let params = &text[i + 2..j];
+                    apply_sgr_sequence(params, &mut style);
+                }
+                i = j + 1;
+                continue;
+            }
+        }
+
+        let Some(ch) = text[i..].chars().next() else {
+            break;
+        };
+        let ch_len = ch.len_utf8();
+        i += ch_len;
+
+        if ch == '\n' {
+            if line_idx >= start_line {
+                let (ss, sh) = segment_style.unwrap_or((style, HighlightKind::None));
+                flush_segment(&mut segment, ss, sh, &mut spans);
+                lines.push(Line::from(std::mem::take(&mut spans)));
+                segment_style = None;
+            }
+            plain_col = 0;
+            line_idx += 1;
+        } else if line_idx >= start_line {
+            let highlight =
+                highlight_kind_for_range(highlights, line_idx, plain_col, plain_col + ch_len);
+            let desired = (style, highlight);
+            if let Some(current) = segment_style {
+                if current != desired {
+                    let (ss, sh) = current;
+                    flush_segment(&mut segment, ss, sh, &mut spans);
+                    segment_style = Some(desired);
+                }
+            } else {
+                segment_style = Some(desired);
+            }
+            segment.push(ch);
+            plain_col += ch_len;
+        }
+        // Before the window: content is skipped (style already tracked above).
+    }
+
+    // Handle the last visible line (no trailing '\n').
+    if line_idx >= start_line && line_idx < end_line {
+        let (ss, sh) = segment_style.unwrap_or((style, HighlightKind::None));
+        flush_segment(&mut segment, ss, sh, &mut spans);
+        if !spans.is_empty() || text.ends_with('\n') {
+            lines.push(Line::from(spans));
+        }
     }
 
     lines
