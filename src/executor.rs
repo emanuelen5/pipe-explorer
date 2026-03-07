@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
-use crate::ansi::{strip_ansi_sgr_bytes, AnsiLineIndex};
+use crate::ansi::{AnsiLineIndex, strip_ansi_sgr_bytes};
 
 /// The display / pipe mode for stage output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,7 +174,11 @@ impl StageOutput {
             return 0;
         }
         self.stdout_newlines
-            + if self.stdout.last() != Some(&b'\n') { 1 } else { 0 }
+            + if self.stdout.last() != Some(&b'\n') {
+                1
+            } else {
+                0
+            }
     }
 
     /// Number of lines in stderr (`lines().count()` semantics, O(1)).
@@ -183,7 +187,11 @@ impl StageOutput {
             return 0;
         }
         self.stderr_newlines
-            + if self.stderr.last() != Some(&b'\n') { 1 } else { 0 }
+            + if self.stderr.last() != Some(&b'\n') {
+                1
+            } else {
+                0
+            }
     }
 
     /// Number of display lines for the given output mode (O(1)).
@@ -195,13 +203,25 @@ impl StageOutput {
     pub fn display_line_count(&self, mode: OutputMode) -> usize {
         match mode {
             OutputMode::Stdout => {
-                if self.stdout.is_empty() { 0 } else { self.stdout_newlines + 1 }
+                if self.stdout.is_empty() {
+                    0
+                } else {
+                    self.stdout_newlines + 1
+                }
             }
             OutputMode::Stderr => {
-                if self.stderr.is_empty() { 0 } else { self.stderr_newlines + 1 }
+                if self.stderr.is_empty() {
+                    0
+                } else {
+                    self.stderr_newlines + 1
+                }
             }
             OutputMode::Combined => {
-                if self.combined.is_empty() { 0 } else { self.combined_newlines + 1 }
+                if self.combined.is_empty() {
+                    0
+                } else {
+                    self.combined_newlines + 1
+                }
             }
         }
     }
@@ -279,8 +299,6 @@ impl ExecutorCache {
         };
         self.cache.insert(key, output);
     }
-
-
 }
 
 fn sha256(data: &[u8]) -> Vec<u8> {
@@ -391,12 +409,7 @@ fn run_shell_command(command: &str, stdin_bytes: &[u8]) -> anyhow::Result<StageO
         .flat_map(|l| l.content.iter().copied())
         .collect();
 
-    Ok(StageOutput::new(
-        stdout,
-        stderr,
-        status.code(),
-        combined,
-    ))
+    Ok(StageOutput::new(stdout, stderr, status.code(), combined))
 }
 
 /// Execute all stages of the pipeline up to and including `up_to_stage`.
@@ -688,12 +701,7 @@ pub fn run_pipeline_streaming(
                                 new_combined: std::mem::take(&mut pend_comb),
                             });
                         }
-                        return Some(StageOutput::new(
-                            stdout_buf,
-                            stderr_buf,
-                            None,
-                            combined_buf,
-                        ));
+                        return Some(StageOutput::new(stdout_buf, stderr_buf, None, combined_buf));
                     }
                 };
 
@@ -1035,8 +1043,14 @@ mod tests {
     fn append_data_combined_interleaving() {
         let mut out = StageOutput::empty();
         let lines = vec![
-            CombinedLine { is_stderr: false, content: b"out\n".to_vec() },
-            CombinedLine { is_stderr: true, content: b"err\n".to_vec() },
+            CombinedLine {
+                is_stderr: false,
+                content: b"out\n".to_vec(),
+            },
+            CombinedLine {
+                is_stderr: true,
+                content: b"err\n".to_vec(),
+            },
         ];
         out.append_data(b"out\n", b"err\n", lines);
         assert_eq!(out.combined.len(), 2);
@@ -1060,8 +1074,14 @@ mod tests {
 
         assert_eq!(from_append.stdout_text(), from_new.stdout_text());
         assert_eq!(from_append.stderr_text(), from_new.stderr_text());
-        assert_eq!(from_append.stdout_line_count(), from_new.stdout_line_count());
-        assert_eq!(from_append.stderr_line_count(), from_new.stderr_line_count());
+        assert_eq!(
+            from_append.stdout_line_count(),
+            from_new.stdout_line_count()
+        );
+        assert_eq!(
+            from_append.stderr_line_count(),
+            from_new.stderr_line_count()
+        );
         assert_eq!(
             from_append.display_line_count(OutputMode::Stdout),
             from_new.display_line_count(OutputMode::Stdout)
@@ -1079,10 +1099,19 @@ mod tests {
         assert_eq!(idx.line_count(), 3); // lines 0, 1, 2
         // Verify style carry-over by rendering line 1 and checking color.
         let lines = crate::ansi::ansi_text_to_visible_lines(
-            out.stdout_text(), 1, 1, &std::collections::HashMap::new(), Some(idx),
+            out.stdout_text(),
+            1,
+            1,
+            &std::collections::HashMap::new(),
+            Some(idx),
         );
         assert!(!lines.is_empty());
-        assert!(lines[0].spans.iter().any(|s| s.style.fg == Some(ratatui::style::Color::Red)));
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .any(|s| s.style.fg == Some(ratatui::style::Color::Red))
+        );
     }
 
     #[test]

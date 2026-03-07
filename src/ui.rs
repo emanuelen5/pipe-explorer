@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 
-use crate::ansi::{ansi_text_to_visible_lines};
+use crate::ansi::ansi_text_to_visible_lines;
 use crate::app::{App, AppMode, OutputMode};
 
 /// Maximum width (columns) of the command editor overlay dialog.
@@ -211,14 +211,18 @@ fn render_output(frame: &mut Frame, app: &App, area: Rect) {
         // matches whose line falls in [scroll, scroll + visible_height).
         // This avoids iterating all 90k+ matches when only ~50 are visible.
         let window_end = scroll + visible_height;
-        let lo = view.search.matches.partition_point(|&(line, _, _)| line < scroll);
-        let hi = view.search.matches.partition_point(|&(line, _, _)| line < window_end);
+        let lo = view
+            .search
+            .matches
+            .partition_point(|&(line, _, _)| line < scroll);
+        let hi = view
+            .search
+            .matches
+            .partition_point(|&(line, _, _)| line < window_end);
         for idx in lo..hi {
             let (line, start, end) = view.search.matches[idx];
             let is_current = idx == view.search.match_idx;
-            map.entry(line)
-                .or_default()
-                .push((start, end, is_current));
+            map.entry(line).or_default().push((start, end, is_current));
         }
         map
     } else {
@@ -264,8 +268,7 @@ fn render_output(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     let text = Text::from(lines);
-    let para = Paragraph::new(text)
-        .wrap(Wrap { trim: false });
+    let para = Paragraph::new(text).wrap(Wrap { trim: false });
     frame.render_widget(para, inner);
 
     // Render scrollbar hint at bottom-right of inner area

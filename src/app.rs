@@ -1,8 +1,8 @@
 use std::borrow::Cow;
 use std::io;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
-use std::sync::Arc;
 
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
@@ -10,9 +10,9 @@ use futures::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc;
 
+use crate::ansi::AnsiLineIndex;
 pub use crate::executor::OutputMode;
 use crate::executor::{ExecutorCache, StageOutput, StreamMsg, run_pipeline_streaming};
-use crate::ansi::AnsiLineIndex;
 use crate::pipeline::Pipeline;
 use crate::search::SearchState;
 use crate::ui;
@@ -1134,21 +1134,11 @@ mod tests {
     }
 
     fn make_stage_output(stdout: &str) -> StageOutput {
-        StageOutput::new(
-            stdout.as_bytes().to_vec(),
-            vec![],
-            Some(0),
-            vec![],
-        )
+        StageOutput::new(stdout.as_bytes().to_vec(), vec![], Some(0), vec![])
     }
 
     fn make_error_stage_output(exit_code: i32) -> StageOutput {
-        StageOutput::new(
-            vec![],
-            b"error".to_vec(),
-            Some(exit_code),
-            vec![],
-        )
+        StageOutput::new(vec![], b"error".to_vec(), Some(exit_code), vec![])
     }
 
     #[test]

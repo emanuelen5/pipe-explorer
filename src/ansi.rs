@@ -650,7 +650,12 @@ mod tests {
         let lines = ansi_text_to_visible_lines(text, 0, 1, &HashMap::new(), None);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines_to_text(&lines), vec!["red"]);
-        assert!(lines[0].spans.iter().any(|s| s.style.fg == Some(Color::Red)));
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .any(|s| s.style.fg == Some(Color::Red))
+        );
     }
 
     #[test]
@@ -659,7 +664,12 @@ mod tests {
         let text = "\x1b[31mred line0\nstill red line1\n";
         let lines = ansi_text_to_visible_lines(text, 1, 1, &HashMap::new(), None);
         assert_eq!(lines_to_text(&lines), vec!["still red line1"]);
-        assert!(lines[0].spans.iter().any(|s| s.style.fg == Some(Color::Red)));
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .any(|s| s.style.fg == Some(Color::Red))
+        );
     }
 
     #[test]
@@ -700,10 +710,12 @@ mod tests {
         let lines = ansi_text_to_visible_lines(text, 0, 1, &highlights, None);
         assert_eq!(lines_to_text(&lines), vec!["hello world"]);
         // The highlighted span should have yellow background (current match).
-        assert!(lines[0]
-            .spans
-            .iter()
-            .any(|s| s.style.bg == Some(Color::Yellow)));
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .any(|s| s.style.bg == Some(Color::Yellow))
+        );
     }
 
     #[test]
