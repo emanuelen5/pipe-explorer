@@ -207,7 +207,14 @@ fn render_output(frame: &mut Frame, app: &App, area: Rect) {
     let line_match_map = if !view.search.matches.is_empty() {
         let mut map: std::collections::HashMap<usize, Vec<(usize, usize, bool)>> =
             std::collections::HashMap::new();
-        for (idx, &(line, start, end)) in view.search.matches.iter().enumerate() {
+        // matches is sorted by line index — use binary search to find only the
+        // matches whose line falls in [scroll, scroll + visible_height).
+        // This avoids iterating all 90k+ matches when only ~50 are visible.
+        let window_end = scroll + visible_height;
+        let lo = view.search.matches.partition_point(|&(line, _, _)| line < scroll);
+        let hi = view.search.matches.partition_point(|&(line, _, _)| line < window_end);
+        for idx in lo..hi {
+            let (line, start, end) = view.search.matches[idx];
             let is_current = idx == view.search.match_idx;
             map.entry(line)
                 .or_default()
