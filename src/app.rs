@@ -1,4 +1,7 @@
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc as std_mpsc;
+use std::sync::Arc;
 
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
@@ -7,7 +10,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc;
 
 pub use crate::executor::OutputMode;
-use crate::executor::{ExecutorCache, StageOutput, execute_pipeline_stages};
+use crate::executor::{ExecutorCache, StageOutput, StreamMsg, run_pipeline_streaming};
 use crate::pipeline::Pipeline;
 use crate::search::SearchState;
 use crate::ui;
@@ -132,13 +135,14 @@ pub enum AppMode {
     Command(EditorState),
 }
 
-/// Messages sent from the background executor task to the main event loop.
-#[derive(Debug)]
-enum ExecMsg {
-    Done {
-        outputs: Vec<StageOutput>,
-        error: Option<String>,
-    },
+/// A request sent to the long-lived background executor task.
+struct ExecRequest {
+    commands: Vec<String>,
+    up_to: usize,
+    force: bool,
+    output_modes: Vec<OutputMode>,
+    cancel: Arc<AtomicBool>,
+    result_tx: std_mpsc::Sender<StreamMsg>,
 }
 
 /// Full application state.
@@ -148,6 +152,7 @@ pub struct App {
     /// Per-stage view state (output mode, search, scroll).
     pub stage_views: Vec<StageViewState>,
     /// Cached outputs per stage (only up to the currently selected stage).
+    /// During streaming, entries are incrementally filled in.
     pub stage_outputs: Vec<StageOutput>,
     /// Error message to display (e.g. command failed).
     pub error_message: Option<String>,
@@ -155,12 +160,12 @@ pub struct App {
     pub running: bool,
     /// Show help overlay?
     pub show_help: bool,
-    /// The executor cache.
-    cache: ExecutorCache,
+    /// Cancellation token shared with the current execution.
+    cancel_token: Arc<AtomicBool>,
     /// Sender for triggering background execution.
-    exec_tx: mpsc::Sender<(Vec<String>, usize, bool, Vec<OutputMode>)>,
-    /// Receiver for execution results.
-    exec_rx: mpsc::Receiver<ExecMsg>,
+    exec_tx: mpsc::Sender<ExecRequest>,
+    /// Receiver for streaming execution results.
+    exec_rx: mpsc::Receiver<StreamMsg>,
 }
 
 /// Compute the new horizontal scroll offset so `before_cursor` (text before the cursor)
@@ -189,35 +194,31 @@ fn compute_editor_scroll(
 
 impl App {
     pub fn new(pipeline: Pipeline) -> Self {
-        let (exec_tx, mut inner_rx) =
-            mpsc::channel::<(Vec<String>, usize, bool, Vec<OutputMode>)>(8);
-        let (inner_tx, exec_rx) = mpsc::channel::<ExecMsg>(8);
+        let (exec_tx, mut request_rx) = mpsc::channel::<ExecRequest>(8);
+        // Dummy receiver — replaced by trigger_exec before the event loop polls.
+        let (_dummy_tx, exec_rx) = mpsc::channel::<StreamMsg>(1);
 
-        // Spawn a background task that runs commands and sends results back.
-        // The actual execution uses spawn_blocking to avoid starving the
-        // tokio runtime with blocking process I/O.
+        // Long-lived background task: owns the executor cache, processes
+        // requests sequentially (cancelled requests exit almost instantly).
         tokio::spawn(async move {
             let mut cache = ExecutorCache::new();
-            while let Some((commands, up_to, force, output_modes)) = inner_rx.recv().await {
+            while let Some(req) = request_rx.recv().await {
                 let mut c = cache;
-                let (result, returned_cache) = tokio::task::spawn_blocking(move || {
-                    let r = execute_pipeline_stages(&mut c, &commands, up_to, force, &output_modes);
-                    (r, c)
+                let (returned_cache,) = tokio::task::spawn_blocking(move || {
+                    run_pipeline_streaming(
+                        &mut c,
+                        &req.commands,
+                        req.up_to,
+                        req.force,
+                        &req.output_modes,
+                        &req.cancel,
+                        &req.result_tx,
+                    );
+                    (c,)
                 })
                 .await
                 .expect("executor task panicked");
                 cache = returned_cache;
-                let msg = match result {
-                    Ok(outputs) => ExecMsg::Done {
-                        outputs,
-                        error: None,
-                    },
-                    Err(e) => ExecMsg::Done {
-                        outputs: vec![],
-                        error: Some(e.to_string()),
-                    },
-                };
-                let _ = inner_tx.send(msg).await;
             }
         });
 
@@ -232,17 +233,39 @@ impl App {
             error_message: None,
             running: false,
             show_help: false,
-            cache: ExecutorCache::new(),
+            cancel_token: Arc::new(AtomicBool::new(false)),
             exec_tx,
             exec_rx,
         }
     }
 
     /// Trigger asynchronous execution of stages up to and including `selected`.
+    ///
+    /// Cancels any in-flight execution, creates a fresh result channel, and
+    /// pre-fills `stage_outputs` with empty placeholders so incremental
+    /// `StreamMsg::StageUpdate` messages can append data in-place.
     pub fn trigger_exec(&mut self, force: bool) {
         if self.pipeline.is_empty() {
             return;
         }
+
+        // Cancel any in-flight execution.
+        self.cancel_token.store(true, Ordering::Relaxed);
+
+        // New cancel token for the new execution.
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.cancel_token = cancel.clone();
+
+        // New result channel (drops old receiver, silencing stale messages).
+        let (tokio_tx, tokio_rx) = mpsc::channel::<StreamMsg>(256);
+        self.exec_rx = tokio_rx;
+
+        // Pre-fill stage_outputs with empty entries for incremental building.
+        let count = (self.pipeline.selected + 1).min(self.pipeline.len());
+        self.stage_outputs = (0..count).map(|_| StageOutput::empty()).collect();
+        self.running = true;
+        self.error_message = None;
+
         let commands: Vec<String> = self
             .pipeline
             .stages
@@ -250,15 +273,34 @@ impl App {
             .map(|s| s.command.clone())
             .collect();
         let up_to = self.pipeline.selected;
-        // Collect the output mode for each stage so the executor knows which
-        // stream to pipe as stdin to the following stage.
         let output_modes: Vec<OutputMode> =
             self.stage_views.iter().map(|v| v.output_mode).collect();
+
+        // Create the sync channel for the executor.
+        let (sync_tx, sync_rx) = std_mpsc::channel::<StreamMsg>();
+
+        let request = ExecRequest {
+            commands,
+            up_to,
+            force,
+            output_modes,
+            cancel,
+            result_tx: sync_tx,
+        };
+
+        // Send request to the long-lived background task (fire-and-forget).
         let tx = self.exec_tx.clone();
-        self.running = true;
-        self.error_message = None;
         tokio::spawn(async move {
-            let _ = tx.send((commands, up_to, force, output_modes)).await;
+            let _ = tx.send(request).await;
+        });
+
+        // Bridge: sync_rx → tokio_tx (runs in a blocking thread).
+        tokio::task::spawn_blocking(move || {
+            while let Ok(msg) = sync_rx.recv() {
+                if tokio_tx.blocking_send(msg).is_err() {
+                    break;
+                }
+            }
         });
     }
 
@@ -285,22 +327,47 @@ impl App {
         self.compute_search_matches();
     }
 
-    /// Poll for any completed execution result. Returns true if the UI should redraw.
-    pub fn poll_exec_result(&mut self) -> bool {
-        match self.exec_rx.try_recv() {
-            Ok(ExecMsg::Done { outputs, error }) => {
+    /// Handle a streaming message from the background executor.
+    /// Returns `true` if the UI should redraw.
+    fn handle_stream_msg(&mut self, msg: StreamMsg) -> bool {
+        match msg {
+            StreamMsg::StageUpdate {
+                stage_idx,
+                new_stdout,
+                new_stderr,
+                new_combined,
+            } => {
+                // Grow stage_outputs if an earlier cached stage sent data
+                // before the streaming stages fully initialised.
+                while self.stage_outputs.len() <= stage_idx {
+                    self.stage_outputs.push(StageOutput::empty());
+                }
+                if let Some(out) = self.stage_outputs.get_mut(stage_idx) {
+                    out.stdout.extend_from_slice(&new_stdout);
+                    out.stderr.extend_from_slice(&new_stderr);
+                    out.combined.extend(new_combined);
+                }
+                true
+            }
+            StreamMsg::StageDone {
+                stage_idx,
+                exit_code,
+            } => {
+                if let Some(out) = self.stage_outputs.get_mut(stage_idx) {
+                    out.exit_code = exit_code;
+                }
+                true
+            }
+            StreamMsg::AllDone { error } => {
                 self.running = false;
                 if let Some(err) = error {
-                    self.error_message = Some(err);
-                } else {
-                    self.stage_outputs = outputs;
-                    self.error_message = None;
+                    if err != "cancelled" {
+                        self.error_message = Some(err);
+                    }
                 }
-                self.view_mut().scroll = 0;
                 self.compute_search_matches();
                 true
             }
-            Err(_) => false,
         }
     }
 
@@ -469,8 +536,6 @@ impl App {
                 stage.command = editor.content;
             }
         }
-        // Invalidate downstream cache and re-run
-        self.cache.clear();
         self.trigger_exec(false);
     }
 
@@ -914,39 +979,40 @@ async fn run_inner(
     app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> Result<()> {
-    // Trigger initial execution if there are stages
+    // Trigger initial execution if there are stages.
     if !app.pipeline.is_empty() {
         app.trigger_exec(false);
     }
 
     let mut event_stream = EventStream::new();
+    let mut dirty = true; // draw the initial frame
 
+    #[allow(unused_assignments)]
     loop {
-        // Poll for completed background execution
-        let exec_done = app.poll_exec_result();
-
-        // Keep editor horizontal scroll in sync with the cursor before drawing.
-        if let Ok(size) = terminal.size() {
-            let max_w = match &app.mode {
-                AppMode::Editing { .. } => Some(EDITOR_DIALOG_MAX_WIDTH),
-                AppMode::Saving(_) => Some(SAVE_DIALOG_MAX_WIDTH),
-                _ => None,
-            };
-            if let Some(w) = max_w {
-                let inner_w = editor_inner_width(size.width, w);
-                app.update_editor_scroll(inner_w);
+        // Redraw only when something changed.
+        if dirty {
+            if let Ok(size) = terminal.size() {
+                let max_w = match &app.mode {
+                    AppMode::Editing { .. } => Some(EDITOR_DIALOG_MAX_WIDTH),
+                    AppMode::Saving(_) => Some(SAVE_DIALOG_MAX_WIDTH),
+                    _ => None,
+                };
+                if let Some(w) = max_w {
+                    let inner_w = editor_inner_width(size.width, w);
+                    app.update_editor_scroll(inner_w);
+                }
             }
+
+            terminal.draw(|frame| {
+                ui::render(frame, app);
+                if app.show_help {
+                    ui::render_help(frame, frame.area());
+                }
+            })?;
+            dirty = false;
         }
 
-        // Draw the UI
-        terminal.draw(|frame| {
-            ui::render(frame, app);
-            if app.show_help {
-                ui::render_help(frame, frame.area());
-            }
-        })?;
-
-        // Wait for the next event (with a short timeout so we can poll exec results)
+        // Wait for either a terminal event or a streaming executor message.
         tokio::select! {
             maybe_event = event_stream.next() => {
                 match maybe_event {
@@ -954,6 +1020,7 @@ async fn run_inner(
                         if app.handle_event(event) {
                             break;
                         }
+                        dirty = true;
                     }
                     Some(Err(e)) => {
                         return Err(anyhow::anyhow!("{}", e));
@@ -961,19 +1028,9 @@ async fn run_inner(
                     None => break,
                 }
             }
-            _ = tokio::time::sleep(tokio::time::Duration::from_millis(50)), if app.running => {
-                // Just loop to poll exec results when running
+            Some(msg) = app.exec_rx.recv() => {
+                dirty = app.handle_stream_msg(msg);
             }
-        }
-
-        // If execution completed, redraw
-        if exec_done {
-            terminal.draw(|frame| {
-                ui::render(frame, app);
-                if app.show_help {
-                    ui::render_help(frame, frame.area());
-                }
-            })?;
         }
     }
 

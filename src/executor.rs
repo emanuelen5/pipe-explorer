@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
@@ -36,6 +39,16 @@ pub struct StageOutput {
 }
 
 impl StageOutput {
+    /// Create an empty stage output (used as a placeholder during streaming).
+    pub fn empty() -> Self {
+        Self {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            exit_code: None,
+            combined: Vec::new(),
+        }
+    }
+
     pub fn stdout_str(&self) -> String {
         String::from_utf8_lossy(&self.stdout).into_owned()
     }
@@ -78,6 +91,7 @@ impl ExecutorCache {
 
     /// Run a shell command with the given stdin bytes.
     /// Returns a cached result if available; otherwise executes and caches.
+    #[allow(dead_code)] // used by tests only
     pub fn run(&mut self, command: &str, stdin: &[u8], force: bool) -> anyhow::Result<StageOutput> {
         let key = CacheKey {
             command: command.to_string(),
@@ -95,6 +109,24 @@ impl ExecutorCache {
         Ok(output)
     }
 
+    /// Look up a cached result without executing.
+    pub fn lookup(&self, command: &str, stdin: &[u8]) -> Option<&StageOutput> {
+        let key = CacheKey {
+            command: command.to_string(),
+            stdin_hash: sha256(stdin),
+        };
+        self.cache.get(&key)
+    }
+
+    /// Store a result in the cache.
+    pub fn store(&mut self, command: &str, stdin: &[u8], output: StageOutput) {
+        let key = CacheKey {
+            command: command.to_string(),
+            stdin_hash: sha256(stdin),
+        };
+        self.cache.insert(key, output);
+    }
+
     /// Invalidate cached entry for a given command and stdin.
     #[allow(dead_code)]
     pub fn invalidate(&mut self, command: &str, stdin: &[u8]) {
@@ -106,6 +138,7 @@ impl ExecutorCache {
     }
 
     /// Clear all cached entries.
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.cache.clear();
     }
@@ -154,6 +187,7 @@ fn read_to_channel(mut reader: impl Read, is_stderr: bool, tx: std_mpsc::Sender<
     }
 }
 
+#[allow(dead_code)] // used by tests via ExecutorCache::run
 fn run_shell_command(command: &str, stdin_bytes: &[u8]) -> anyhow::Result<StageOutput> {
     let mut child = Command::new("sh")
         .arg("-c")
@@ -231,6 +265,7 @@ fn run_shell_command(command: &str, stdin_bytes: &[u8]) -> anyhow::Result<StageO
 ///
 /// `output_modes[i]` controls which output of stage `i` is piped as stdin to
 /// stage `i+1`.
+#[allow(dead_code)] // used by tests only
 pub fn execute_pipeline_stages(
     cache: &mut ExecutorCache,
     commands: &[String],
@@ -260,6 +295,352 @@ pub fn execute_pipeline_stages(
     }
 
     Ok(outputs)
+}
+
+// ---------------------------------------------------------------------------
+// Streaming pipeline execution
+// ---------------------------------------------------------------------------
+
+/// Messages sent from the streaming executor to the UI.
+#[derive(Debug)]
+pub enum StreamMsg {
+    /// Incremental update for a stage's output buffers.
+    StageUpdate {
+        stage_idx: usize,
+        new_stdout: Vec<u8>,
+        new_stderr: Vec<u8>,
+        new_combined: Vec<CombinedLine>,
+    },
+    /// A stage's process has exited.
+    StageDone {
+        stage_idx: usize,
+        exit_code: Option<i32>,
+    },
+    /// The entire pipeline execution has finished.
+    AllDone { error: Option<String> },
+}
+
+/// The minimum interval between UI update messages for each stage.
+const UI_THROTTLE: Duration = Duration::from_millis(100);
+
+/// Spawn a child process for the given shell command.
+fn spawn_shell(command: &str) -> anyhow::Result<std::process::Child> {
+    Ok(Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .env("TERM", "xterm-256color")
+        .env("COLORTERM", "truecolor")
+        .env("CLICOLOR", "1")
+        .env("CLICOLOR_FORCE", "1")
+        .env("FORCE_COLOR", "3")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?)
+}
+
+/// Extract the output stream to relay to the next stage (with ANSI stripping).
+fn extract_relay_bytes(output: &StageOutput, mode: OutputMode) -> Vec<u8> {
+    match mode {
+        OutputMode::Stdout => strip_ansi_sgr_bytes(&output.stdout),
+        OutputMode::Stderr => strip_ansi_sgr_bytes(&output.stderr),
+        OutputMode::Combined => {
+            let combined_bytes: Vec<u8> = output
+                .combined
+                .iter()
+                .flat_map(|l| l.content.iter().copied())
+                .collect();
+            strip_ansi_sgr_bytes(&combined_bytes)
+        }
+    }
+}
+
+/// Run the pipeline with true concurrent streaming between stages.
+///
+/// Stages are spawned as concurrent OS processes. Data flows from stage N's
+/// selected output stream (after ANSI stripping) to stage N+1's stdin in real
+/// time. UI update messages are throttled to at most one per [`UI_THROTTLE`]
+/// interval per stage.
+///
+/// `cancel` can be set to `true` to abort execution — all child processes will
+/// be killed and threads will exit.
+///
+/// Cache behaviour: before spawning processes, we check the cache sequentially
+/// (since each key depends on the previous stage's full output hash). Cached
+/// stages emit immediate `StageUpdate` + `StageDone`. From the first cache
+/// miss onward, all remaining stages stream concurrently.
+pub fn run_pipeline_streaming(
+    cache: &mut ExecutorCache,
+    commands: &[String],
+    up_to: usize,
+    force: bool,
+    output_modes: &[OutputMode],
+    cancel: &Arc<AtomicBool>,
+    ui_tx: &std_mpsc::Sender<StreamMsg>,
+) {
+    let count = commands.len().min(up_to + 1);
+    if count == 0 {
+        let _ = ui_tx.send(StreamMsg::AllDone { error: None });
+        return;
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 1: serve as many stages as possible from cache
+    // ------------------------------------------------------------------
+    let mut initial_stdin: Vec<u8> = Vec::new();
+    let mut miss_idx: Option<usize> = None;
+
+    if !force {
+        for i in 0..count {
+            if cancel.load(Ordering::Relaxed) {
+                let _ = ui_tx.send(StreamMsg::AllDone {
+                    error: Some("cancelled".to_string()),
+                });
+                return;
+            }
+            if let Some(hit) = cache.lookup(&commands[i], &initial_stdin) {
+                let hit = hit.clone();
+                let _ = ui_tx.send(StreamMsg::StageUpdate {
+                    stage_idx: i,
+                    new_stdout: hit.stdout.clone(),
+                    new_stderr: hit.stderr.clone(),
+                    new_combined: hit.combined.clone(),
+                });
+                let _ = ui_tx.send(StreamMsg::StageDone {
+                    stage_idx: i,
+                    exit_code: hit.exit_code,
+                });
+                let mode = output_modes.get(i).copied().unwrap_or(OutputMode::Stdout);
+                initial_stdin = extract_relay_bytes(&hit, mode);
+            } else {
+                miss_idx = Some(i);
+                break;
+            }
+        }
+    } else {
+        miss_idx = Some(0);
+    }
+
+    let miss_idx = match miss_idx {
+        Some(idx) => idx,
+        None => {
+            let _ = ui_tx.send(StreamMsg::AllDone { error: None });
+            return;
+        }
+    };
+
+    // ------------------------------------------------------------------
+    // Phase 2: stream remaining stages concurrently
+    //
+    // Two-pass setup:
+    //  1. Pre-create all inter-stage stdin channels.
+    //  2. Spawn child processes + reader/writer/collector threads.
+    //  3. Feed initial stdin, drop extra senders, wait for completion.
+    // ------------------------------------------------------------------
+    let stream_count = count - miss_idx;
+
+    // Pre-create stdin data channels for each streaming stage.
+    let mut stdin_txs: Vec<std_mpsc::Sender<Vec<u8>>> = Vec::with_capacity(stream_count);
+    let mut stdin_rxs: Vec<Option<std_mpsc::Receiver<Vec<u8>>>> = Vec::with_capacity(stream_count);
+    for _ in 0..stream_count {
+        let (tx, rx) = std_mpsc::channel::<Vec<u8>>();
+        stdin_txs.push(tx);
+        stdin_rxs.push(Some(rx));
+    }
+
+    // Save initial_stdin for caching before we move it.
+    let initial_stdin_for_cache = initial_stdin.clone();
+
+    struct LiveStage {
+        child: std::process::Child,
+        collector: std::thread::JoinHandle<Option<StageOutput>>,
+    }
+
+    let mut live: Vec<Option<LiveStage>> = Vec::with_capacity(stream_count);
+
+    for j in 0..stream_count {
+        let i = miss_idx + j;
+        if cancel.load(Ordering::Relaxed) {
+            for ls in live.iter_mut().flatten() {
+                let _ = ls.child.kill();
+            }
+            let _ = ui_tx.send(StreamMsg::AllDone {
+                error: Some("cancelled".to_string()),
+            });
+            return;
+        }
+
+        let mut child = match spawn_shell(&commands[i]) {
+            Ok(c) => c,
+            Err(e) => {
+                for ls in live.iter_mut().flatten() {
+                    let _ = ls.child.kill();
+                }
+                let _ = ui_tx.send(StreamMsg::AllDone {
+                    error: Some(format!("stage {}: {}", i, e)),
+                });
+                return;
+            }
+        };
+
+        let stdin_pipe = child.stdin.take().unwrap();
+        let stdout_pipe = child.stdout.take().unwrap();
+        let stderr_pipe = child.stderr.take().unwrap();
+
+        // Writer thread: stdin_rx → child stdin pipe.
+        let data_rx = stdin_rxs[j].take().unwrap();
+        let cancel_w = cancel.clone();
+        std::thread::spawn(move || {
+            let mut w = stdin_pipe;
+            while let Ok(chunk) = data_rx.recv() {
+                if cancel_w.load(Ordering::Relaxed) {
+                    break;
+                }
+                if w.write_all(&chunk).is_err() {
+                    break;
+                }
+            }
+        });
+
+        // stdout / stderr readers → combined channel.
+        let (combined_tx, combined_rx) = std_mpsc::channel::<CombinedLine>();
+        let tx_out = combined_tx.clone();
+        std::thread::spawn(move || {
+            read_to_channel(stdout_pipe, false, tx_out);
+        });
+        std::thread::spawn(move || {
+            read_to_channel(stderr_pipe, true, combined_tx);
+        });
+
+        // Collector / relay thread.
+        let mode = output_modes.get(i).copied().unwrap_or(OutputMode::Stdout);
+        let relay_tx: Option<std_mpsc::Sender<Vec<u8>>> = if j + 1 < stream_count {
+            Some(stdin_txs[j + 1].clone())
+        } else {
+            None
+        };
+        let ui_tx_c = ui_tx.clone();
+        let cancel_c = cancel.clone();
+
+        let collector = std::thread::spawn(move || {
+            let mut stdout_buf: Vec<u8> = Vec::new();
+            let mut stderr_buf: Vec<u8> = Vec::new();
+            let mut combined_buf: Vec<CombinedLine> = Vec::new();
+            let mut pend_out: Vec<u8> = Vec::new();
+            let mut pend_err: Vec<u8> = Vec::new();
+            let mut pend_comb: Vec<CombinedLine> = Vec::new();
+            let mut last_ui = Instant::now();
+
+            loop {
+                if cancel_c.load(Ordering::Relaxed) {
+                    return None;
+                }
+
+                let line = match combined_rx.recv_timeout(Duration::from_millis(10)) {
+                    Ok(l) => Some(l),
+                    Err(std_mpsc::RecvTimeoutError::Timeout) => None,
+                    Err(std_mpsc::RecvTimeoutError::Disconnected) => {
+                        // Flush remaining.
+                        if !pend_out.is_empty() || !pend_err.is_empty() || !pend_comb.is_empty() {
+                            let _ = ui_tx_c.send(StreamMsg::StageUpdate {
+                                stage_idx: i,
+                                new_stdout: std::mem::take(&mut pend_out),
+                                new_stderr: std::mem::take(&mut pend_err),
+                                new_combined: std::mem::take(&mut pend_comb),
+                            });
+                        }
+                        return Some(StageOutput {
+                            stdout: stdout_buf,
+                            stderr: stderr_buf,
+                            exit_code: None,
+                            combined: combined_buf,
+                        });
+                    }
+                };
+
+                if let Some(line) = line {
+                    // Relay to next stage immediately.
+                    if let Some(ref relay) = relay_tx {
+                        let bytes = match mode {
+                            OutputMode::Stdout if !line.is_stderr => {
+                                Some(strip_ansi_sgr_bytes(&line.content))
+                            }
+                            OutputMode::Stderr if line.is_stderr => {
+                                Some(strip_ansi_sgr_bytes(&line.content))
+                            }
+                            OutputMode::Combined => Some(strip_ansi_sgr_bytes(&line.content)),
+                            _ => None,
+                        };
+                        if let Some(b) = bytes {
+                            let _ = relay.send(b);
+                        }
+                    }
+
+                    if line.is_stderr {
+                        stderr_buf.extend_from_slice(&line.content);
+                        pend_err.extend_from_slice(&line.content);
+                    } else {
+                        stdout_buf.extend_from_slice(&line.content);
+                        pend_out.extend_from_slice(&line.content);
+                    }
+                    pend_comb.push(line.clone());
+                    combined_buf.push(line);
+                }
+
+                // Throttled UI send.
+                if last_ui.elapsed() >= UI_THROTTLE
+                    && (!pend_out.is_empty() || !pend_err.is_empty() || !pend_comb.is_empty())
+                {
+                    let _ = ui_tx_c.send(StreamMsg::StageUpdate {
+                        stage_idx: i,
+                        new_stdout: std::mem::take(&mut pend_out),
+                        new_stderr: std::mem::take(&mut pend_err),
+                        new_combined: std::mem::take(&mut pend_comb),
+                    });
+                    last_ui = Instant::now();
+                }
+            }
+        });
+
+        live.push(Some(LiveStage { child, collector }));
+    }
+
+    // Feed initial stdin to stage 0.
+    if !initial_stdin.is_empty() {
+        let _ = stdin_txs[0].send(initial_stdin);
+    }
+    // Drop all our copies of stdin_txs. The only remaining senders are the
+    // relay_tx clones held by each collector for the *next* stage's channel.
+    // Stage 0: no upstream relay → channel closes → writer EOF.
+    // Stage j>0: collector j-1 holds a clone → channel open until that collector ends.
+    drop(stdin_txs);
+
+    // ------------------------------------------------------------------
+    // Wait for children, collect outputs, cache, send StageDone / AllDone.
+    // ------------------------------------------------------------------
+    let mut prev_stdin = initial_stdin_for_cache;
+
+    for (j, slot) in live.iter_mut().enumerate() {
+        let i = miss_idx + j;
+        if let Some(mut ls) = slot.take() {
+            let exit_code = ls.child.wait().ok().and_then(|s| s.code());
+            let mut output = ls.collector.join().ok().flatten();
+
+            if let Some(ref mut out) = output {
+                out.exit_code = exit_code;
+                cache.store(&commands[i], &prev_stdin, out.clone());
+                let mode = output_modes.get(i).copied().unwrap_or(OutputMode::Stdout);
+                prev_stdin = extract_relay_bytes(out, mode);
+            }
+
+            let _ = ui_tx.send(StreamMsg::StageDone {
+                stage_idx: i,
+                exit_code,
+            });
+        }
+    }
+
+    let _ = ui_tx.send(StreamMsg::AllDone { error: None });
 }
 
 #[cfg(test)]
