@@ -13,3 +13,4 @@ sha2 = "0.10"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 regex = "1"
+bytecount = "0.6.9"

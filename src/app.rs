@@ -344,10 +344,7 @@ impl App {
                     self.stage_outputs.push(StageOutput::empty());
                 }
                 if let Some(out) = self.stage_outputs.get_mut(stage_idx) {
-                    out.stdout.extend_from_slice(&new_stdout);
-                    out.stderr.extend_from_slice(&new_stderr);
-                    out.combined.extend(new_combined);
-                    out.refresh_text_cache();
+                    out.append_data(&new_stdout, &new_stderr, new_combined);
                 }
                 true
             }
