@@ -22,7 +22,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Stages bar
+            Constraint::Length(4), // Stages bar (2 content rows: counts + command)
             Constraint::Min(0),    // Output pager
             Constraint::Length(1), // Status bar
         ])
@@ -41,7 +41,17 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 }
 
-/// Render the pipeline stages bar at the top.
+/// Build the pipe connector string based on a stage's output mode.
+/// This is the shell syntax that redirects the right stream into the pipe.
+pub fn pipe_connector(mode: OutputMode) -> &'static str {
+    match mode {
+        OutputMode::Stdout => " | ",
+        OutputMode::Combined => " 2>&1 | ",
+        OutputMode::Stderr => " 2>&1 >/dev/null | ",
+    }
+}
+
+/// Render the pipeline stages bar at the top as a single copyable command.
 fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
     if app.pipeline.is_empty() {
         let msg = Paragraph::new("No stages — press 'o' to add a new stage")
@@ -51,57 +61,106 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    // Create evenly divided sub-areas for each stage
+    // --- Build the selected-stage detail for the bottom title ---
+    let selected = app.pipeline.selected;
+    let sel_output = app.stage_outputs.get(selected);
+    let sel_exit = sel_output.and_then(|o| o.exit_code);
+    let sel_error = matches!(sel_exit, Some(code) if code != 0);
+
+    let sel_stdout = sel_output.map(|o| o.stdout_line_count()).unwrap_or(0);
+    let sel_stderr = sel_output.map(|o| o.stderr_line_count()).unwrap_or(0);
+    let sel_mode = app
+        .stage_views
+        .get(selected)
+        .map(|v| v.output_mode)
+        .unwrap_or(OutputMode::Stdout);
+    let detail_label = match sel_mode {
+        OutputMode::Stdout => format!("{}/[{}]", sel_stdout, sel_stderr),
+        OutputMode::Stderr => format!("[{}]/{}", sel_stdout, sel_stderr),
+        OutputMode::Combined => {
+            format!("{}+{}={}", sel_stdout, sel_stderr, sel_stdout + sel_stderr)
+        }
+    };
+
+    let any_error = app
+        .stage_outputs
+        .iter()
+        .any(|o| matches!(o.exit_code, Some(c) if c != 0));
+    let block_style = if sel_error {
+        Style::default().fg(Color::Red)
+    } else {
+        Style::default()
+    };
+    let title = if any_error {
+        " Pipeline ✗ "
+    } else {
+        " Pipeline "
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .title_bottom(
+            ratatui::text::Line::from(format!(" {} ", detail_label)).alignment(Alignment::Right),
+        )
+        .style(block_style);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // --- Line 1: per-stage line counts, aligned above each command segment ---
+    // --- Line 2: pure copyable bash command ---
+    let mut count_spans: Vec<Span> = Vec::new();
+    let mut cmd_spans: Vec<Span> = Vec::new();
     let n = app.pipeline.len();
-    let widths: Vec<Constraint> = (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
-    let stage_areas = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(widths)
-        .split(area);
 
     for (i, stage) in app.pipeline.stages.iter().enumerate() {
-        let is_selected = i == app.pipeline.selected;
+        let is_selected = i == selected;
+
+        let cmd_text = if stage.command.is_empty() {
+            "<empty>"
+        } else {
+            &stage.command
+        };
 
         let stage_output = app.stage_outputs.get(i);
-        let exit_code = stage_output.and_then(|o| o.exit_code);
-        let is_error = matches!(exit_code, Some(code) if code != 0);
-        let line_count = stage_output.map(|o| o.stdout_line_count());
+        let stage_exit = stage_output.and_then(|o| o.exit_code);
+        let stage_error = matches!(stage_exit, Some(code) if code != 0);
+        let stage_mode = mode_for_stage(app, i);
 
-        let title = match (is_error, line_count) {
-            (true, Some(lines)) => format!("✗ ({} lines) ", lines),
-            (false, Some(lines)) => format!("{} lines ", lines),
-            (true, None) => format!(" ✗ "),
-            (false, None) => format!(" "),
+        // Compute the line count label for this stage.
+        let line_count = stage_output
+            .map(|o| match stage_mode {
+                OutputMode::Stdout => o.stdout_line_count(),
+                OutputMode::Stderr => o.stderr_line_count(),
+                OutputMode::Combined => o.stdout_line_count() + o.stderr_line_count(),
+            })
+            .unwrap_or(0);
+        let error_mark = if stage_error { "✗" } else { "" };
+        let count_label = format!("{}{}", line_count, error_mark);
+
+        // The connector that follows this command (empty for the last stage).
+        let connector = if i + 1 < n {
+            pipe_connector(stage_mode)
+        } else {
+            ""
         };
 
-        let stdout_count = app
-            .stage_outputs
-            .get(i)
-            .map(|o| o.stdout_line_count())
-            .unwrap_or(0);
+        // The segment width is command + connector; pad the count label to match.
+        let segment_width = cmd_text.len() + connector.len();
+        let padded_count = format!("{:<width$}", count_label, width = segment_width);
 
-        let stderr_count = app
-            .stage_outputs
-            .get(i)
-            .map(|o| o.stderr_line_count())
-            .unwrap_or(0);
-
-        let stage_view = app.stage_views.get(i);
-        let line_count_label = match stage_view
-            .map(|v| v.output_mode)
-            .unwrap_or(OutputMode::Stdout)
-        {
-            OutputMode::Stdout => format!("{}/[{}]", stdout_count, stderr_count),
-            OutputMode::Stderr => format!("[{}]/{}", stdout_count, stderr_count),
-            OutputMode::Combined => format!(
-                "{}+{}={}",
-                stdout_count,
-                stderr_count,
-                stdout_count + stderr_count
-            ),
+        let count_style = if stage_error {
+            Style::default().fg(Color::Red)
+        } else if is_selected {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
         };
+        count_spans.push(Span::styled(padded_count, count_style));
 
-        let style = if is_selected && is_error {
+        // Command span.
+        let cmd_style = if is_selected && stage_error {
             Style::default()
                 .fg(Color::White)
                 .bg(Color::Red)
@@ -111,25 +170,33 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
                 .fg(Color::White)
                 .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD)
-        } else if is_error {
+        } else if stage_error {
             Style::default().fg(Color::Red)
         } else {
             Style::default().fg(Color::White)
         };
+        cmd_spans.push(Span::styled(cmd_text.to_string(), cmd_style));
 
-        let cmd_display = if stage.command.is_empty() {
-            "<empty>".to_string()
-        } else {
-            stage.command.clone()
-        };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(title)
-            .title_bottom(ratatui::text::Line::from(line_count_label).alignment(Alignment::Right))
-            .style(style);
-        let paragraph = Paragraph::new(cmd_display).block(block).style(style);
-        frame.render_widget(paragraph, stage_areas[i]);
+        // Connector span on the command line.
+        if !connector.is_empty() {
+            cmd_spans.push(Span::styled(
+                connector,
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
     }
+
+    let text = Text::from(vec![Line::from(count_spans), Line::from(cmd_spans)]);
+    let para = Paragraph::new(text);
+    frame.render_widget(para, inner);
+}
+
+/// Get the output mode for a given stage (used to determine the pipe connector).
+fn mode_for_stage(app: &App, stage_idx: usize) -> OutputMode {
+    app.stage_views
+        .get(stage_idx)
+        .map(|v| v.output_mode)
+        .unwrap_or(OutputMode::Stdout)
 }
 
 /// Render the output pager area.
