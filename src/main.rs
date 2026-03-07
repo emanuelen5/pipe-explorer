@@ -21,7 +21,7 @@ struct Args {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() {
     // Install a panic hook that restores the terminal before printing the panic.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -49,5 +49,8 @@ async fn main() -> anyhow::Result<()> {
             .collect::<Vec<_>>()
             .join(" | ")
     );
-    result
+
+    // By using exit we ensure that any background processes that still are
+    // executing are killed immediately
+    std::process::exit(if result.is_ok() { 0 } else { 1 });
 }
