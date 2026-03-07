@@ -6,7 +6,7 @@ use ratatui::{
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-struct AnsiStyleState {
+pub(crate) struct AnsiStyleState {
     fg: Option<Color>,
     bg: Option<Color>,
     bold: bool,
@@ -101,7 +101,7 @@ fn parse_ansi_number(param: Option<&str>) -> Option<u16> {
     param.and_then(|p| p.parse::<u16>().ok())
 }
 
-fn apply_sgr_sequence(params: &str, style: &mut AnsiStyleState) {
+pub(crate) fn apply_sgr_sequence(params: &str, style: &mut AnsiStyleState) {
     let mut parts = params.split(';').peekable();
     if params.is_empty() {
         *style = AnsiStyleState::default();
@@ -156,6 +156,74 @@ fn apply_sgr_sequence(params: &str, style: &mut AnsiStyleState) {
             }
             _ => {}
         }
+    }
+}
+
+/// Pre-computed index of line-start byte offsets and ANSI style state.
+///
+/// Built incrementally as text grows (via `extend`), allowing
+/// `ansi_text_to_visible_lines` to jump directly to any scroll position
+/// without scanning all preceding bytes.
+#[derive(Clone, Debug)]
+pub struct AnsiLineIndex {
+    /// Byte offset of the start of each line in the source text.
+    offsets: Vec<usize>,
+    /// ANSI style state at the start of each line.
+    styles: Vec<AnsiStyleState>,
+    /// How many bytes of the text have been scanned so far.
+    scanned_up_to: usize,
+    /// Style state at `scanned_up_to` (carried forward on next extend).
+    trailing_style: AnsiStyleState,
+}
+
+impl AnsiLineIndex {
+    /// Create an empty index (line 0 starts at byte 0 with default style).
+    pub fn new() -> Self {
+        Self {
+            offsets: vec![0],
+            styles: vec![AnsiStyleState::default()],
+            scanned_up_to: 0,
+            trailing_style: AnsiStyleState::default(),
+        }
+    }
+
+    /// Extend the index by scanning any new content in `text` past what was
+    /// previously scanned.  Only the new bytes are visited.
+    pub fn extend(&mut self, text: &str) {
+        let bytes = text.as_bytes();
+        if bytes.len() <= self.scanned_up_to {
+            return;
+        }
+        let mut i = self.scanned_up_to;
+        let mut style = self.trailing_style;
+
+        while i < bytes.len() {
+            if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+                let mut j = i + 2;
+                while j < bytes.len() {
+                    if (bytes[j] as char).is_ascii_alphabetic() {
+                        break;
+                    }
+                    j += 1;
+                }
+                if j < bytes.len() {
+                    if bytes[j] == b'm' {
+                        let params = &text[i + 2..j];
+                        apply_sgr_sequence(params, &mut style);
+                    }
+                    i = j + 1;
+                    continue;
+                }
+            }
+            if bytes[i] == b'\n' {
+                self.offsets.push(i + 1);
+                self.styles.push(style);
+            }
+            i += 1;
+        }
+
+        self.scanned_up_to = bytes.len();
+        self.trailing_style = style;
     }
 }
 
@@ -339,6 +407,7 @@ pub fn ansi_text_to_visible_lines(
     start_line: usize,
     max_lines: usize,
     highlights: &HashMap<usize, Vec<(usize, usize, bool)>>,
+    line_index: Option<&AnsiLineIndex>,
 ) -> Vec<Line<'static>> {
     let end_line = start_line + max_lines;
     let bytes = text.as_bytes();
@@ -346,35 +415,44 @@ pub fn ansi_text_to_visible_lines(
     let mut line_idx = 0usize;
     let mut i = 0usize;
 
-    // --- Phase 1: fast byte-scan to `start_line` --------------------------------
-    // Only track ANSI SGR sequences (for style carry-over) and count `\n`
-    // bytes.  All other bytes are skipped without any UTF-8 decoding.
-    while i < bytes.len() && line_idx < start_line {
-        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
-            let mut j = i + 2;
-            while j < bytes.len() {
-                if (bytes[j] as char).is_ascii_alphabetic() {
-                    break;
+    // --- Phase 1: seek to `start_line` -------------------------------------------
+    // If a pre-built line index is available and covers `start_line`, jump
+    // directly to the byte offset and restore the ANSI style — O(1).
+    // Otherwise fall back to a byte-level scan.
+    let indexed = line_index
+        .filter(|idx| start_line < idx.offsets.len())
+        .map(|idx| (idx.offsets[start_line], idx.styles[start_line]));
+
+    if let Some((offset, cached_style)) = indexed {
+        i = offset;
+        style = cached_style;
+        line_idx = start_line;
+    } else {
+        while i < bytes.len() && line_idx < start_line {
+            if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+                let mut j = i + 2;
+                while j < bytes.len() {
+                    if (bytes[j] as char).is_ascii_alphabetic() {
+                        break;
+                    }
+                    j += 1;
                 }
-                j += 1;
-            }
-            if j < bytes.len() {
-                if bytes[j] == b'm' {
-                    // Safety: escape-sequence bytes are always ASCII, so
-                    // i+2..j is a valid str slice.
-                    let params = &text[i + 2..j];
-                    apply_sgr_sequence(params, &mut style);
+                if j < bytes.len() {
+                    if bytes[j] == b'm' {
+                        let params = &text[i + 2..j];
+                        apply_sgr_sequence(params, &mut style);
+                    }
+                    i = j + 1;
+                } else {
+                    i += 1;
                 }
-                i = j + 1;
-            } else {
-                i += 1;
+                continue;
             }
-            continue;
+            if bytes[i] == b'\n' {
+                line_idx += 1;
+            }
+            i += 1;
         }
-        if bytes[i] == b'\n' {
-            line_idx += 1;
-        }
-        i += 1;
     }
 
     // --- Phase 2: full parse for the visible window ------------------------------

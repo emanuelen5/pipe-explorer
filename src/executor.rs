@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
-use crate::ansi::strip_ansi_sgr_bytes;
+use crate::ansi::{strip_ansi_sgr_bytes, AnsiLineIndex};
 
 /// The display / pipe mode for stage output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +44,9 @@ pub struct StageOutput {
     stdout_newlines: usize,
     stderr_newlines: usize,
     combined_newlines: usize,
+    /// Pre-built line indexes for O(1) scroll seeking.
+    stdout_line_index: AnsiLineIndex,
+    stderr_line_index: AnsiLineIndex,
 }
 
 impl StageOutput {
@@ -63,6 +66,10 @@ impl StageOutput {
             .flat_map(|l| l.content.iter())
             .filter(|&&b| b == b'\n')
             .count();
+        let mut stdout_line_index = AnsiLineIndex::new();
+        stdout_line_index.extend(&stdout_text);
+        let mut stderr_line_index = AnsiLineIndex::new();
+        stderr_line_index.extend(&stderr_text);
         Self {
             stdout,
             stderr,
@@ -73,6 +80,8 @@ impl StageOutput {
             stdout_newlines,
             stderr_newlines,
             combined_newlines,
+            stdout_line_index,
+            stderr_line_index,
         }
     }
 
@@ -88,6 +97,8 @@ impl StageOutput {
             stdout_newlines: 0,
             stderr_newlines: 0,
             combined_newlines: 0,
+            stdout_line_index: AnsiLineIndex::new(),
+            stderr_line_index: AnsiLineIndex::new(),
         }
     }
 
@@ -121,6 +132,20 @@ impl StageOutput {
         // Incremental UTF-8 text caches.
         append_text_incremental(&mut self.stdout_text, new_stdout, &self.stdout);
         append_text_incremental(&mut self.stderr_text, new_stderr, &self.stderr);
+
+        // Extend line indexes (only scans the newly appended portion).
+        self.stdout_line_index.extend(&self.stdout_text);
+        self.stderr_line_index.extend(&self.stderr_text);
+    }
+
+    /// Get the pre-built line index for the given output mode.
+    /// Returns `None` for Combined mode (no persistent index).
+    pub fn line_index(&self, mode: OutputMode) -> Option<&AnsiLineIndex> {
+        match mode {
+            OutputMode::Stdout => Some(&self.stdout_line_index),
+            OutputMode::Stderr => Some(&self.stderr_line_index),
+            OutputMode::Combined => None,
+        }
     }
 
     /// Cached UTF-8 text for stdout (zero-cost borrow).

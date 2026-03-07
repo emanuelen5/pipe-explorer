@@ -219,13 +219,15 @@ fn render_output(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     // Only parse visible lines — skip ANSI content before `scroll`, stop
-    // after `visible_height` lines.  This is the key performance win for
-    // large outputs.
+    // after `visible_height` lines.  When a pre-built line index is
+    // available (stdout/stderr), phase 1 is skipped entirely via O(1) lookup.
+    let line_index = app.current_line_index();
     let mut lines = ansi_text_to_visible_lines(
         &raw_content,
         scroll,
         visible_height,
         &line_match_map,
+        line_index,
     );
 
     // In combined mode, prepend a 1-column margin indicating the source stream:

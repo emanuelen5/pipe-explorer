@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 
 pub use crate::executor::OutputMode;
 use crate::executor::{ExecutorCache, StageOutput, StreamMsg, run_pipeline_streaming};
+use crate::ansi::AnsiLineIndex;
 use crate::pipeline::Pipeline;
 use crate::search::SearchState;
 use crate::ui;
@@ -419,6 +420,19 @@ impl App {
                     .concat(),
             ),
         }
+    }
+
+    /// Get the pre-built ANSI line index for the current output.
+    /// Returns `None` for Combined mode or when no output exists.
+    pub fn current_line_index(&self) -> Option<&AnsiLineIndex> {
+        if self.pipeline.is_empty() || self.stage_outputs.is_empty() {
+            return None;
+        }
+        let idx = self
+            .pipeline
+            .selected
+            .min(self.stage_outputs.len().saturating_sub(1));
+        self.stage_outputs[idx].line_index(self.view().output_mode)
     }
 
     /// Returns a vector of booleans (one per line of `current_output_text()`) indicating
