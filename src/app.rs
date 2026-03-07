@@ -347,6 +347,7 @@ impl App {
                     out.stdout.extend_from_slice(&new_stdout);
                     out.stderr.extend_from_slice(&new_stderr);
                     out.combined.extend(new_combined);
+                    out.refresh_text_cache();
                 }
                 true
             }
@@ -411,8 +412,8 @@ impl App {
             .min(self.stage_outputs.len().saturating_sub(1));
         let out = &self.stage_outputs[idx];
         match self.view().output_mode {
-            OutputMode::Stdout => String::from_utf8_lossy(&out.stdout),
-            OutputMode::Stderr => String::from_utf8_lossy(&out.stderr),
+            OutputMode::Stdout => Cow::Borrowed(out.stdout_text()),
+            OutputMode::Stderr => Cow::Borrowed(out.stderr_text()),
             OutputMode::Combined => Cow::Owned(
                 out.combined
                     .iter()
@@ -1081,21 +1082,21 @@ mod tests {
     }
 
     fn make_stage_output(stdout: &str) -> StageOutput {
-        StageOutput {
-            stdout: stdout.as_bytes().to_vec(),
-            stderr: vec![],
-            exit_code: Some(0),
-            combined: vec![],
-        }
+        StageOutput::new(
+            stdout.as_bytes().to_vec(),
+            vec![],
+            Some(0),
+            vec![],
+        )
     }
 
     fn make_error_stage_output(exit_code: i32) -> StageOutput {
-        StageOutput {
-            stdout: vec![],
-            stderr: b"error".to_vec(),
-            exit_code: Some(exit_code),
-            combined: vec![],
-        }
+        StageOutput::new(
+            vec![],
+            b"error".to_vec(),
+            Some(exit_code),
+            vec![],
+        )
     }
 
     #[test]

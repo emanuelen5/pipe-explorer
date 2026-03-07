@@ -36,9 +36,32 @@ pub struct StageOutput {
     pub exit_code: Option<i32>,
     /// Lines from stdout and stderr interleaved in the order they were received.
     pub combined: Vec<CombinedLine>,
+    /// Cached UTF-8 text for stdout (kept in sync with `stdout` bytes).
+    stdout_text: String,
+    /// Cached UTF-8 text for stderr (kept in sync with `stderr` bytes).
+    stderr_text: String,
 }
 
 impl StageOutput {
+    /// Create a new stage output, eagerly computing the UTF-8 text cache.
+    pub fn new(
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+        exit_code: Option<i32>,
+        combined: Vec<CombinedLine>,
+    ) -> Self {
+        let stdout_text = String::from_utf8_lossy(&stdout).into_owned();
+        let stderr_text = String::from_utf8_lossy(&stderr).into_owned();
+        Self {
+            stdout,
+            stderr,
+            exit_code,
+            combined,
+            stdout_text,
+            stderr_text,
+        }
+    }
+
     /// Create an empty stage output (used as a placeholder during streaming).
     pub fn empty() -> Self {
         Self {
@@ -46,17 +69,36 @@ impl StageOutput {
             stderr: Vec::new(),
             exit_code: None,
             combined: Vec::new(),
+            stdout_text: String::new(),
+            stderr_text: String::new(),
         }
+    }
+
+    /// Recompute the cached UTF-8 text from the raw byte buffers.
+    /// Call this after mutating `stdout` or `stderr` directly.
+    pub fn refresh_text_cache(&mut self) {
+        self.stdout_text = String::from_utf8_lossy(&self.stdout).into_owned();
+        self.stderr_text = String::from_utf8_lossy(&self.stderr).into_owned();
+    }
+
+    /// Cached UTF-8 text for stdout (zero-cost borrow).
+    pub fn stdout_text(&self) -> &str {
+        &self.stdout_text
+    }
+
+    /// Cached UTF-8 text for stderr (zero-cost borrow).
+    pub fn stderr_text(&self) -> &str {
+        &self.stderr_text
     }
 
     #[allow(dead_code)] // used by tests
     pub fn stdout_str(&self) -> String {
-        String::from_utf8_lossy(&self.stdout).into_owned()
+        self.stdout_text.clone()
     }
 
     #[allow(dead_code)] // used by tests
     pub fn stderr_str(&self) -> String {
-        String::from_utf8_lossy(&self.stderr).into_owned()
+        self.stderr_text.clone()
     }
 
     /// Count the number of lines in stdout without allocating a full String.
@@ -296,12 +338,12 @@ fn run_shell_command(command: &str, stdin_bytes: &[u8]) -> anyhow::Result<StageO
         .flat_map(|l| l.content.iter().copied())
         .collect();
 
-    Ok(StageOutput {
+    Ok(StageOutput::new(
         stdout,
         stderr,
-        exit_code: status.code(),
+        status.code(),
         combined,
-    })
+    ))
 }
 
 /// Execute all stages of the pipeline up to and including `up_to_stage`.
@@ -593,12 +635,12 @@ pub fn run_pipeline_streaming(
                                 new_combined: std::mem::take(&mut pend_comb),
                             });
                         }
-                        return Some(StageOutput {
-                            stdout: stdout_buf,
-                            stderr: stderr_buf,
-                            exit_code: None,
-                            combined: combined_buf,
-                        });
+                        return Some(StageOutput::new(
+                            stdout_buf,
+                            stderr_buf,
+                            None,
+                            combined_buf,
+                        ));
                     }
                 };
 
