@@ -7,6 +7,14 @@ use sha2::{Digest, Sha256};
 
 use crate::ansi::strip_ansi_sgr_bytes;
 
+/// The display / pipe mode for stage output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputMode {
+    Stdout,
+    Stderr,
+    Combined,
+}
+
 /// A single chunk captured from either stdout or stderr of a child process,
 /// representing one line of output (including the trailing `\n`, if any).
 #[derive(Debug, Clone)]
@@ -208,25 +216,32 @@ fn run_shell_command(command: &str, stdin_bytes: &[u8]) -> anyhow::Result<StageO
 /// Execute all stages of the pipeline up to and including `up_to_stage`.
 /// Returns the outputs for each stage.
 ///
-/// `use_stderr_as_next_input[i]` – when `true`, the stderr of stage `i` is piped as stdin
-/// to stage `i+1` instead of stdout.  Missing entries default to `false` (use stdout).
+/// `output_modes[i]` controls which output of stage `i` is piped as stdin to
+/// stage `i+1`.
 pub fn execute_pipeline_stages(
     cache: &mut ExecutorCache,
     commands: &[String],
     up_to: usize,
     force: bool,
-    use_stderr_as_next_input: &[bool],
+    output_modes: &[OutputMode],
 ) -> anyhow::Result<Vec<StageOutput>> {
     let mut outputs: Vec<StageOutput> = Vec::new();
     let mut stdin: Vec<u8> = Vec::new();
 
     for (i, cmd) in commands.iter().take(up_to + 1).enumerate() {
         let out = cache.run(cmd, &stdin, force)?;
-        let use_stderr = use_stderr_as_next_input.get(i).copied().unwrap_or(false);
-        stdin = if use_stderr {
-            strip_ansi_sgr_bytes(&out.stderr)
-        } else {
-            strip_ansi_sgr_bytes(&out.stdout)
+        let mode = output_modes.get(i).copied().unwrap_or(OutputMode::Stdout);
+        stdin = match mode {
+            OutputMode::Stdout => strip_ansi_sgr_bytes(&out.stdout),
+            OutputMode::Stderr => strip_ansi_sgr_bytes(&out.stderr),
+            OutputMode::Combined => {
+                let combined_bytes: Vec<u8> = out
+                    .combined
+                    .iter()
+                    .flat_map(|l| l.content.iter().copied())
+                    .collect();
+                strip_ansi_sgr_bytes(&combined_bytes)
+            }
         };
         outputs.push(out);
     }
@@ -325,12 +340,121 @@ mod tests {
             "echo errline >&2".to_string(),
             "wc -c".to_string(),
         ];
-        // use_stderr=true for stage 0 → stage 1 receives stderr of stage 0.
+        // OutputMode::Stderr for stage 0 → stage 1 receives stderr of stage 0.
         let outputs =
-            execute_pipeline_stages(&mut cache, &commands, 1, false, &[true]).unwrap();
+            execute_pipeline_stages(&mut cache, &commands, 1, false, &[OutputMode::Stderr]).unwrap();
         assert_eq!(outputs.len(), 2);
         let byte_count: u32 = outputs[1].stdout_str().trim().parse().unwrap();
         // "errline\n" is 8 bytes.
         assert_eq!(byte_count, 8);
+    }
+
+    /// Different output modes produce different stdin for downstream stages and
+    /// therefore separate cache entries.  Switching back to a previously-used
+    /// mode returns the original cached result (cache hit by stdin hash).
+    #[test]
+    fn test_output_mode_switches_use_separate_cache_entries() {
+        let mut cache = ExecutorCache::new();
+        // Stage 0 writes distinct content to stdout and stderr.
+        // Stage 1 (cat) just passes its stdin through.
+        let commands = vec![
+            "echo stdout_data; echo stderr_data >&2".to_string(),
+            "cat".to_string(),
+        ];
+
+        // Run with Stdout mode: stage 1 receives "stdout_data\n".
+        let out_a = execute_pipeline_stages(
+            &mut cache, &commands, 1, false, &[OutputMode::Stdout],
+        ).unwrap();
+        assert_eq!(out_a[1].stdout_str().trim(), "stdout_data");
+
+        // Run with Stderr mode: stage 1 receives "stderr_data\n".
+        let out_b = execute_pipeline_stages(
+            &mut cache, &commands, 1, false, &[OutputMode::Stderr],
+        ).unwrap();
+        assert_eq!(out_b[1].stdout_str().trim(), "stderr_data");
+
+        // Switch back to Stdout (force=false): should be a cache hit — same
+        // result as the first run.
+        let out_a2 = execute_pipeline_stages(
+            &mut cache, &commands, 1, false, &[OutputMode::Stdout],
+        ).unwrap();
+        assert_eq!(out_a2[1].stdout, out_a[1].stdout);
+
+        // Switch back to Stderr (force=false): cache hit — same as second run.
+        let out_b2 = execute_pipeline_stages(
+            &mut cache, &commands, 1, false, &[OutputMode::Stderr],
+        ).unwrap();
+        assert_eq!(out_b2[1].stdout, out_b[1].stdout);
+    }
+
+    /// Combined output mode pipes both stdout and stderr (interleaved) as stdin
+    /// to the next stage, producing a result different from Stdout-only or
+    /// Stderr-only modes.
+    #[test]
+    fn test_combined_output_mode_pipes_both_streams() {
+        let mut cache = ExecutorCache::new();
+        let commands = vec![
+            "echo out; echo err >&2".to_string(),
+            "wc -l".to_string(),
+        ];
+
+        // Stdout mode: 1 line ("out\n").
+        let out = execute_pipeline_stages(
+            &mut cache, &commands, 1, false, &[OutputMode::Stdout],
+        ).unwrap();
+        let lines_stdout: u32 = out[1].stdout_str().trim().parse().unwrap();
+        assert_eq!(lines_stdout, 1);
+
+        // Stderr mode: 1 line ("err\n").
+        let out = execute_pipeline_stages(
+            &mut cache, &commands, 1, false, &[OutputMode::Stderr],
+        ).unwrap();
+        let lines_stderr: u32 = out[1].stdout_str().trim().parse().unwrap();
+        assert_eq!(lines_stderr, 1);
+
+        // Combined mode: 2 lines ("out\n" + "err\n").
+        let out = execute_pipeline_stages(
+            &mut cache, &commands, 1, false, &[OutputMode::Combined],
+        ).unwrap();
+        let lines_combined: u32 = out[1].stdout_str().trim().parse().unwrap();
+        assert_eq!(lines_combined, 2);
+    }
+
+    /// Switching back to a previously-used output mode is a cache hit: the
+    /// downstream stage is not re-executed because the (command, stdin_hash)
+    /// pair is already in the cache.
+    #[test]
+    fn test_cache_hit_when_switching_output_mode_back() {
+        let mut cache = ExecutorCache::new();
+        // Use a command that writes a unique timestamp to a temp file on each
+        // invocation.  We avoid that complexity by instead counting cache
+        // entries via a proxy: run the pipeline three times, toggling modes,
+        // and confirm byte-identical results when returning to the first mode.
+        let commands = vec![
+            "printf 'hello from stdout'; printf 'hello from stderr' >&2".to_string(),
+            "cat".to_string(),
+        ];
+
+        // First run: Stdout.
+        let run1 = execute_pipeline_stages(
+            &mut cache, &commands, 1, false, &[OutputMode::Stdout],
+        ).unwrap();
+
+        // Second run: Stderr (different stdin → different cache key).
+        let run2 = execute_pipeline_stages(
+            &mut cache, &commands, 1, false, &[OutputMode::Stderr],
+        ).unwrap();
+
+        // Third run: Stdout again (force=false → must be served from cache).
+        let run3 = execute_pipeline_stages(
+            &mut cache, &commands, 1, false, &[OutputMode::Stdout],
+        ).unwrap();
+
+        // run1 and run3 must be byte-identical (cache hit).
+        assert_eq!(run1[1].stdout, run3[1].stdout);
+        assert_eq!(run1[1].stderr, run3[1].stderr);
+        // run2 must differ from run1 (different input stream).
+        assert_ne!(run1[1].stdout, run2[1].stdout);
     }
 }

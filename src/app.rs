@@ -6,18 +6,11 @@ use futures::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc;
 
+pub use crate::executor::OutputMode;
 use crate::executor::{ExecutorCache, StageOutput, execute_pipeline_stages};
 use crate::pipeline::Pipeline;
 use crate::search::SearchState;
 use crate::ui;
-
-/// The display mode for stage output.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutputMode {
-    Stdout,
-    Stderr,
-    Combined,
-}
 
 /// Per-stage view state (output mode, search, scroll position).
 #[derive(Debug)]
@@ -165,7 +158,7 @@ pub struct App {
     /// The executor cache.
     cache: ExecutorCache,
     /// Sender for triggering background execution.
-    exec_tx: mpsc::Sender<(Vec<String>, usize, bool, Vec<bool>)>,
+    exec_tx: mpsc::Sender<(Vec<String>, usize, bool, Vec<OutputMode>)>,
     /// Receiver for execution results.
     exec_rx: mpsc::Receiver<ExecMsg>,
 }
@@ -196,7 +189,8 @@ fn compute_editor_scroll(
 
 impl App {
     pub fn new(pipeline: Pipeline) -> Self {
-        let (exec_tx, mut inner_rx) = mpsc::channel::<(Vec<String>, usize, bool, Vec<bool>)>(8);
+        let (exec_tx, mut inner_rx) =
+            mpsc::channel::<(Vec<String>, usize, bool, Vec<OutputMode>)>(8);
         let (inner_tx, exec_rx) = mpsc::channel::<ExecMsg>(8);
 
         // Spawn a background task that runs commands and sends results back.
@@ -204,10 +198,10 @@ impl App {
         // tokio runtime with blocking process I/O.
         tokio::spawn(async move {
             let mut cache = ExecutorCache::new();
-            while let Some((commands, up_to, force, use_stderr)) = inner_rx.recv().await {
+            while let Some((commands, up_to, force, output_modes)) = inner_rx.recv().await {
                 let mut c = cache;
                 let (result, returned_cache) = tokio::task::spawn_blocking(move || {
-                    let r = execute_pipeline_stages(&mut c, &commands, up_to, force, &use_stderr);
+                    let r = execute_pipeline_stages(&mut c, &commands, up_to, force, &output_modes);
                     (r, c)
                 })
                 .await
@@ -256,18 +250,39 @@ impl App {
             .map(|s| s.command.clone())
             .collect();
         let up_to = self.pipeline.selected;
-        // Determine which stages pipe stderr (instead of stdout) into the next stage.
-        let use_stderr: Vec<bool> = self
-            .stage_views
-            .iter()
-            .map(|v| v.output_mode == OutputMode::Stderr)
-            .collect();
+        // Collect the output mode for each stage so the executor knows which
+        // stream to pipe as stdin to the following stage.
+        let output_modes: Vec<OutputMode> =
+            self.stage_views.iter().map(|v| v.output_mode).collect();
         let tx = self.exec_tx.clone();
         self.running = true;
         self.error_message = None;
         tokio::spawn(async move {
-            let _ = tx.send((commands, up_to, force, use_stderr)).await;
+            let _ = tx.send((commands, up_to, force, output_modes)).await;
         });
+    }
+
+    /// Change the output mode of a given stage.
+    ///
+    /// When the mode changes for stage `stage_idx`, any downstream stage outputs
+    /// are invalidated (truncated) because their stdin will differ.  The executor-
+    /// level cache still keeps previous results keyed by `(command, sha256(stdin))`,
+    /// so switching back to a previously-used mode will be a cache hit.
+    pub fn set_output_mode(&mut self, stage_idx: usize, mode: OutputMode) {
+        // Ensure stage_views is large enough.
+        while self.stage_views.len() <= stage_idx {
+            self.stage_views.push(StageViewState::default());
+        }
+        self.stage_views[stage_idx].output_mode = mode;
+        self.stage_views[stage_idx].scroll = 0;
+
+        // Invalidate downstream stage outputs: keep only up to stage_idx (inclusive).
+        let keep = stage_idx + 1;
+        if self.stage_outputs.len() > keep {
+            self.stage_outputs.truncate(keep);
+        }
+
+        self.compute_search_matches();
     }
 
     /// Poll for any completed execution result. Returns true if the UI should redraw.
@@ -616,28 +631,25 @@ impl App {
 
             // Output mode
             KeyCode::Char('m') => {
-                match self.view().output_mode {
-                    OutputMode::Stdout => self.view_mut().output_mode = OutputMode::Stderr,
-                    OutputMode::Stderr => self.view_mut().output_mode = OutputMode::Combined,
-                    OutputMode::Combined => self.view_mut().output_mode = OutputMode::Stdout,
-                }
-                self.view_mut().scroll = 0;
-                self.compute_search_matches();
+                let idx = self.pipeline.selected;
+                let new_mode = match self.view().output_mode {
+                    OutputMode::Stdout => OutputMode::Stderr,
+                    OutputMode::Stderr => OutputMode::Combined,
+                    OutputMode::Combined => OutputMode::Stdout,
+                };
+                self.set_output_mode(idx, new_mode);
             }
             KeyCode::Char('1') => {
-                self.view_mut().output_mode = OutputMode::Stdout;
-                self.view_mut().scroll = 0;
-                self.compute_search_matches();
+                let idx = self.pipeline.selected;
+                self.set_output_mode(idx, OutputMode::Stdout);
             }
             KeyCode::Char('2') => {
-                self.view_mut().output_mode = OutputMode::Stderr;
-                self.view_mut().scroll = 0;
-                self.compute_search_matches();
+                let idx = self.pipeline.selected;
+                self.set_output_mode(idx, OutputMode::Stderr);
             }
             KeyCode::Char('3') => {
-                self.view_mut().output_mode = OutputMode::Combined;
-                self.view_mut().scroll = 0;
-                self.compute_search_matches();
+                let idx = self.pipeline.selected;
+                self.set_output_mode(idx, OutputMode::Combined);
             }
 
             // Pager scrolling
@@ -1131,5 +1143,150 @@ mod tests {
         // Error exit code of stage 1 must be preserved.
         assert_eq!(app.stage_outputs[1].exit_code, Some(1));
         assert_eq!(app.stage_outputs.len(), 3);
+    }
+
+    /// Changing output mode on stage 0 invalidates downstream stage_outputs so that
+    /// following stages will recalculate with the newly selected input stream.
+    #[tokio::test]
+    async fn test_set_output_mode_invalidates_downstream_outputs() {
+        let pipeline = parse_pipeline("echo a | echo b | echo c");
+        let mut app = App::new(pipeline);
+
+        // All three stages have been executed.
+        app.stage_outputs = vec![
+            make_stage_output("a\n"),
+            make_stage_output("b\n"),
+            make_stage_output("c\n"),
+        ];
+        app.pipeline.selected = 0;
+
+        // Change mode on stage 0 → should invalidate stages 1 and 2.
+        app.set_output_mode(app.pipeline.selected, OutputMode::Stderr);
+
+        assert_eq!(app.stage_views[0].output_mode, OutputMode::Stderr);
+        // Only stage 0's output remains; downstream outputs are purged.
+        assert_eq!(app.stage_outputs.len(), 1);
+    }
+
+    /// After changing output mode, navigating right triggers re-execution of
+    /// the now-invalidated downstream stage.
+    #[tokio::test]
+    async fn test_output_mode_change_causes_downstream_reexec_on_navigate() {
+        let pipeline = parse_pipeline("echo a | echo b");
+        let mut app = App::new(pipeline);
+
+        app.stage_outputs = vec![make_stage_output("a\n"), make_stage_output("b\n")];
+        app.pipeline.selected = 0;
+
+        // Change mode: stage 1's inputs might now differ.
+        app.set_output_mode(app.pipeline.selected, OutputMode::Stderr);
+
+        // Navigate right: stage 1 is no longer in stage_outputs → exec is triggered.
+        app.handle_event(make_key(KeyCode::Right));
+
+        assert_eq!(app.pipeline.selected, 1);
+        assert!(
+            app.running,
+            "execution must be triggered for the invalidated downstream stage"
+        );
+    }
+
+    /// Changing output mode on the last stage does not purge any outputs since
+    /// there are no downstream stages.
+    #[tokio::test]
+    async fn test_set_output_mode_on_last_stage_preserves_all_outputs() {
+        let pipeline = parse_pipeline("echo a | echo b");
+        let mut app = App::new(pipeline);
+
+        app.stage_outputs = vec![make_stage_output("a\n"), make_stage_output("b\n")];
+        app.pipeline.selected = 1; // last stage
+
+        app.set_output_mode(app.pipeline.selected, OutputMode::Stderr);
+
+        // Both outputs must still be present because stage 1 is the last stage.
+        assert_eq!(app.stage_outputs.len(), 2);
+        assert_eq!(app.stage_views[1].output_mode, OutputMode::Stderr);
+    }
+
+    /// Switching output mode back and forth truncates downstream outputs every
+    /// time, even when returning to the original mode.  This ensures the UI
+    /// always triggers re-execution (which will be a cache hit in the background
+    /// executor).
+    #[tokio::test]
+    async fn test_switch_mode_back_and_forth_truncates_each_time() {
+        let pipeline = parse_pipeline("echo a | cat | wc -c");
+        let mut app = App::new(pipeline);
+
+        app.stage_outputs = vec![
+            make_stage_output("a\n"),
+            make_stage_output("a\n"),
+            make_stage_output("2\n"),
+        ];
+        app.pipeline.selected = 0;
+
+        // Switch to stderr → downstream truncated.
+        app.set_output_mode(0, OutputMode::Stderr);
+        assert_eq!(app.stage_outputs.len(), 1);
+
+        // Pretend stages 1-2 were re-executed with stderr input.
+        app.stage_outputs = vec![
+            make_stage_output("a\n"),
+            make_stage_output(""),
+            make_stage_output("0\n"),
+        ];
+
+        // Switch back to stdout → downstream truncated again.
+        app.set_output_mode(0, OutputMode::Stdout);
+        assert_eq!(app.stage_outputs.len(), 1);
+        assert_eq!(app.stage_views[0].output_mode, OutputMode::Stdout);
+    }
+
+    /// After switching output mode back to the original, navigating to a
+    /// downstream stage triggers re-execution.  The background executor's
+    /// cache (keyed by command + sha256(stdin)) still holds the old result,
+    /// so this will be a cache hit — no actual subprocess is spawned.
+    #[tokio::test]
+    async fn test_switch_mode_back_triggers_reexec_for_cache_hit() {
+        let pipeline = parse_pipeline("echo a | cat");
+        let mut app = App::new(pipeline);
+
+        app.stage_outputs = vec![make_stage_output("a\n"), make_stage_output("a\n")];
+        app.pipeline.selected = 0;
+
+        // Switch to stderr (truncates downstream).
+        app.set_output_mode(0, OutputMode::Stderr);
+        assert_eq!(app.stage_outputs.len(), 1);
+
+        // Switch back to stdout (truncates downstream again).
+        app.set_output_mode(0, OutputMode::Stdout);
+        assert_eq!(app.stage_outputs.len(), 1);
+
+        // Navigate right: stage 1 is missing from stage_outputs → exec triggered.
+        app.handle_event(make_key(KeyCode::Right));
+        assert_eq!(app.pipeline.selected, 1);
+        assert!(
+            app.running,
+            "execution must be triggered so the executor cache can serve the result"
+        );
+    }
+
+    /// Pressing 'm' to cycle output mode on a non-last stage truncates
+    /// downstream outputs, just like calling set_output_mode directly.
+    #[tokio::test]
+    async fn test_key_m_cycles_mode_and_invalidates_downstream() {
+        let pipeline = parse_pipeline("echo a | cat | wc -c");
+        let mut app = App::new(pipeline);
+
+        app.stage_outputs = vec![
+            make_stage_output("a\n"),
+            make_stage_output("a\n"),
+            make_stage_output("2\n"),
+        ];
+        app.pipeline.selected = 0;
+
+        // Press 'm' → Stdout → Stderr, downstream truncated.
+        app.handle_event(make_key(KeyCode::Char('m')));
+        assert_eq!(app.stage_views[0].output_mode, OutputMode::Stderr);
+        assert_eq!(app.stage_outputs.len(), 1);
     }
 }
