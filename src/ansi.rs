@@ -324,9 +324,16 @@ pub fn ansi_text_to_lines_with_highlights(
 /// Parse only the visible window `[start_line, start_line + max_lines)` from
 /// ANSI-escaped text.
 ///
-/// For lines before `start_line`, ANSI style state is tracked but no `Span`
-/// objects or `String` allocations are made.  Parsing stops as soon as the
-/// visible window is complete.
+/// The function uses a two-phase approach:
+///  1. **Byte scan** – lines before `start_line` are scanned at the raw byte
+///     level (no UTF-8 decoding, no `String` allocations).  Only ANSI SGR
+///     escape sequences and `\n` bytes are recognised so that style state
+///     carries over correctly.
+///  2. **Full parse** – lines inside the visible window are parsed
+///     character-by-character to build styled `Span`/`Line` objects.
+///
+/// This eliminates the main bottleneck (50 % of CPU in profiling) caused by
+/// per-character UTF-8 decoding of all lines above the scroll position.
 pub fn ansi_text_to_visible_lines(
     text: &str,
     start_line: usize,
@@ -334,25 +341,15 @@ pub fn ansi_text_to_visible_lines(
     highlights: &HashMap<usize, Vec<(usize, usize, bool)>>,
 ) -> Vec<Line<'static>> {
     let end_line = start_line + max_lines;
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut segment = String::new();
+    let bytes = text.as_bytes();
     let mut style = AnsiStyleState::default();
     let mut line_idx = 0usize;
-    let mut plain_col = 0usize;
-    let mut segment_style: Option<(AnsiStyleState, HighlightKind)> = None;
-
-    let bytes = text.as_bytes();
     let mut i = 0usize;
 
-    while i < bytes.len() {
-        // Past the visible window — stop.
-        if line_idx >= end_line {
-            break;
-        }
-
-        // Always parse ANSI escape sequences (style tracking is needed even
-        // before the visible window so colours carry over correctly).
+    // --- Phase 1: fast byte-scan to `start_line` --------------------------------
+    // Only track ANSI SGR sequences (for style carry-over) and count `\n`
+    // bytes.  All other bytes are skipped without any UTF-8 decoding.
+    while i < bytes.len() && line_idx < start_line {
         if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
             let mut j = i + 2;
             while j < bytes.len() {
@@ -361,16 +358,50 @@ pub fn ansi_text_to_visible_lines(
                 }
                 j += 1;
             }
-
             if j < bytes.len() {
-                let final_ch = bytes[j] as char;
-                if final_ch == 'm' {
-                    if line_idx >= start_line {
-                        let (ss, sh) =
-                            segment_style.unwrap_or((style, HighlightKind::None));
-                        flush_segment(&mut segment, ss, sh, &mut spans);
-                        segment_style = None;
-                    }
+                if bytes[j] == b'm' {
+                    // Safety: escape-sequence bytes are always ASCII, so
+                    // i+2..j is a valid str slice.
+                    let params = &text[i + 2..j];
+                    apply_sgr_sequence(params, &mut style);
+                }
+                i = j + 1;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i] == b'\n' {
+            line_idx += 1;
+        }
+        i += 1;
+    }
+
+    // --- Phase 2: full parse for the visible window ------------------------------
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut segment = String::new();
+    let mut plain_col = 0usize;
+    let mut segment_style: Option<(AnsiStyleState, HighlightKind)> = None;
+
+    while i < bytes.len() {
+        if line_idx >= end_line {
+            break;
+        }
+
+        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            let mut j = i + 2;
+            while j < bytes.len() {
+                if (bytes[j] as char).is_ascii_alphabetic() {
+                    break;
+                }
+                j += 1;
+            }
+            if j < bytes.len() {
+                if bytes[j] == b'm' {
+                    let (ss, sh) = segment_style.unwrap_or((style, HighlightKind::None));
+                    flush_segment(&mut segment, ss, sh, &mut spans);
+                    segment_style = None;
                     let params = &text[i + 2..j];
                     apply_sgr_sequence(params, &mut style);
                 }
@@ -386,15 +417,13 @@ pub fn ansi_text_to_visible_lines(
         i += ch_len;
 
         if ch == '\n' {
-            if line_idx >= start_line {
-                let (ss, sh) = segment_style.unwrap_or((style, HighlightKind::None));
-                flush_segment(&mut segment, ss, sh, &mut spans);
-                lines.push(Line::from(std::mem::take(&mut spans)));
-                segment_style = None;
-            }
+            let (ss, sh) = segment_style.unwrap_or((style, HighlightKind::None));
+            flush_segment(&mut segment, ss, sh, &mut spans);
+            lines.push(Line::from(std::mem::take(&mut spans)));
+            segment_style = None;
             plain_col = 0;
             line_idx += 1;
-        } else if line_idx >= start_line {
+        } else {
             let highlight =
                 highlight_kind_for_range(highlights, line_idx, plain_col, plain_col + ch_len);
             let desired = (style, highlight);
@@ -410,7 +439,6 @@ pub fn ansi_text_to_visible_lines(
             segment.push(ch);
             plain_col += ch_len;
         }
-        // Before the window: content is skipped (style already tracked above).
     }
 
     // Handle the last visible line (no trailing '\n').
