@@ -15,7 +15,7 @@ pub const EDITOR_DIALOG_MAX_WIDTH: u16 = 120;
 pub const SAVE_DIALOG_MAX_WIDTH: u16 = 60;
 
 /// Render the full TUI.
-pub fn render(frame: &mut Frame, app: &App) {
+pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
     // Split: stages bar (top), output (middle), status bar (bottom)
@@ -203,7 +203,10 @@ fn mode_for_stage(app: &App, stage_idx: usize) -> OutputMode {
 }
 
 /// Render the output pager area.
-fn render_output(frame: &mut Frame, app: &App, area: Rect) {
+fn render_output(frame: &mut Frame, app: &mut App, area: Rect) {
+    const BORDER_SIZE: u16 = 2;
+    app.visible_output_lines = area.height.saturating_sub(BORDER_SIZE).max(1) as usize;
+
     let exit_info = if !app.stage_outputs.is_empty() {
         let idx = app
             .pipeline
