@@ -90,6 +90,17 @@ impl EditorState {
                     self.content.remove(self.cursor);
                 }
             }
+            KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let new_cursor = word_left_pos(&self.content[..self.cursor]);
+                debug_assert!(self.content.is_char_boundary(new_cursor));
+                self.cursor = new_cursor;
+            }
+            KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let delta = word_right_pos(&self.content[self.cursor..]);
+                let new_cursor = self.cursor + delta;
+                debug_assert!(self.content.is_char_boundary(new_cursor));
+                self.cursor = new_cursor;
+            }
             KeyCode::Left => {
                 if self.cursor > 0 {
                     let s = &self.content[..self.cursor];
@@ -170,6 +181,38 @@ pub struct App {
     exec_rx: mpsc::Receiver<StreamMsg>,
     /// Number of visible lines in the output pane (updated each frame by the renderer).
     pub visible_output_lines: usize,
+}
+
+/// Return the byte offset within `before_cursor` where the previous word begins.
+/// Skips trailing whitespace, then skips backwards over the word characters.
+fn word_left_pos(before_cursor: &str) -> usize {
+    let chars: Vec<(usize, char)> = before_cursor.char_indices().collect();
+    let n = chars.len();
+    let mut i = n;
+    while i > 0 && chars[i - 1].1.is_whitespace() {
+        i -= 1;
+    }
+    while i > 0 && !chars[i - 1].1.is_whitespace() {
+        i -= 1;
+    }
+    if i == 0 {
+        0
+    } else {
+        chars[i].0
+    }
+}
+
+/// Return the byte offset within `after_cursor` where the next word begins.
+/// Skips forward over the current word characters, then over any whitespace.
+fn word_right_pos(after_cursor: &str) -> usize {
+    let mut iter = after_cursor.char_indices().peekable();
+    while matches!(iter.peek(), Some((_, c)) if !c.is_whitespace()) {
+        iter.next();
+    }
+    while matches!(iter.peek(), Some((_, c)) if c.is_whitespace()) {
+        iter.next();
+    }
+    iter.peek().map(|(i, _)| *i).unwrap_or(after_cursor.len())
 }
 
 /// Compute the new horizontal scroll offset so `before_cursor` (text before the cursor)
@@ -1171,6 +1214,102 @@ mod tests {
     fn test_editor_scroll_zero_inner_width() {
         // Should return current scroll unchanged (no-op).
         assert_eq!(compute_editor_scroll(0, "hello", 0), 0);
+    }
+
+    #[test]
+    fn test_word_left_from_middle_of_word() {
+        // "hello world" with cursor after "world" → lands at start of "world" (index 6)
+        assert_eq!(word_left_pos("hello world"), 6);
+    }
+
+    #[test]
+    fn test_word_left_with_trailing_whitespace() {
+        // "hello world " with cursor after trailing space → lands at "w" (index 6)
+        assert_eq!(word_left_pos("hello world "), 6);
+    }
+
+    #[test]
+    fn test_word_left_from_start_of_word() {
+        // "hello " with cursor right after the space → lands at "h" (index 0)
+        assert_eq!(word_left_pos("hello "), 0);
+    }
+
+    #[test]
+    fn test_word_left_at_beginning() {
+        // Empty before-cursor → stays at 0
+        assert_eq!(word_left_pos(""), 0);
+    }
+
+    #[test]
+    fn test_word_left_only_whitespace() {
+        // Only spaces before cursor → lands at 0
+        assert_eq!(word_left_pos("   "), 0);
+    }
+
+    #[test]
+    fn test_word_right_from_start_of_word() {
+        // "hello world" cursor at 0 → jumps past "hello " to index 6
+        assert_eq!(word_right_pos("hello world"), 6);
+    }
+
+    #[test]
+    fn test_word_right_from_whitespace() {
+        // " world" cursor at 0 (sitting on whitespace) → jumps to index 1 ("w")
+        assert_eq!(word_right_pos(" world"), 1);
+    }
+
+    #[test]
+    fn test_word_right_at_last_word() {
+        // "world" with no trailing content → moves to end (len = 5)
+        assert_eq!(word_right_pos("world"), 5);
+    }
+
+    #[test]
+    fn test_word_right_at_end() {
+        // Empty after-cursor → stays at 0
+        assert_eq!(word_right_pos(""), 0);
+    }
+
+    #[test]
+    fn test_word_right_only_whitespace() {
+        // Only spaces remaining → jumps to end
+        assert_eq!(word_right_pos("   "), 3);
+    }
+
+    #[test]
+    fn test_editor_ctrl_left_jumps_to_word_start() {
+        let mut editor = EditorState::new("hello world".to_string());
+        // cursor starts at end (11)
+        let key = KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL);
+        editor.handle_key(key);
+        assert_eq!(editor.cursor, 6); // start of "world"
+    }
+
+    #[test]
+    fn test_editor_ctrl_right_jumps_to_next_word_start() {
+        let mut editor = EditorState::new("hello world".to_string());
+        editor.cursor = 0;
+        let key = KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL);
+        editor.handle_key(key);
+        assert_eq!(editor.cursor, 6); // start of "world"
+    }
+
+    #[test]
+    fn test_editor_ctrl_left_at_beginning_stays() {
+        let mut editor = EditorState::new("hello".to_string());
+        editor.cursor = 0;
+        let key = KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL);
+        editor.handle_key(key);
+        assert_eq!(editor.cursor, 0);
+    }
+
+    #[test]
+    fn test_editor_ctrl_right_at_end_stays() {
+        let mut editor = EditorState::new("hello".to_string());
+        // cursor already at end
+        let key = KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL);
+        editor.handle_key(key);
+        assert_eq!(editor.cursor, 5);
     }
 
     /// Navigate left preserves all stage_outputs (no exec triggered).
