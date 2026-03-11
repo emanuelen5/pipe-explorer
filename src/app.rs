@@ -1186,6 +1186,57 @@ mod tests {
         StageOutput::new(vec![], b"error".to_vec(), Some(exit_code), vec![])
     }
 
+    /// Parses a text description with pointer indicators, used in tests to visually describe
+    /// a string and byte offsets into it.
+    ///
+    /// The first line of `description` is the text. Each subsequent line may contain a `^`
+    /// character; the column position of `^` gives the corresponding byte offset into the
+    /// text. Offsets are returned in the order the pointer lines appear.
+    ///
+    /// # Example
+    /// ```
+    /// // "hello world" with first pointer at 'o' (offset 4) and second at 'h' (offset 0)
+    /// let (text, offsets) = parse_pointer_description("hello world\n    ^      \n^          ");
+    /// assert_eq!(text, "hello world");
+    /// assert_eq!(offsets, vec![4, 0]);
+    /// ```
+    fn parse_pointer_description(description: &str) -> (&str, Vec<usize>) {
+        let mut lines = description.lines();
+        let text = lines.next().unwrap_or("");
+        let offsets = lines.filter_map(|line| line.find('^')).collect();
+        (text, offsets)
+    }
+
+    #[test]
+    fn test_parse_pointer_description_two_pointers() {
+        // Example from the problem statement: first pointer at 'o' (offset 4), second at 'h' (offset 0)
+        let (text, offsets) =
+            parse_pointer_description("hello world\n    ^      \n^          ");
+        assert_eq!(text, "hello world");
+        assert_eq!(offsets, vec![4, 0]);
+    }
+
+    #[test]
+    fn test_parse_pointer_description_single_pointer() {
+        let (text, offsets) = parse_pointer_description("hello world\n      ^    ");
+        assert_eq!(text, "hello world");
+        assert_eq!(offsets, vec![6]);
+    }
+
+    #[test]
+    fn test_parse_pointer_description_empty_text() {
+        let (text, offsets) = parse_pointer_description("\n^");
+        assert_eq!(text, "");
+        assert_eq!(offsets, vec![0]);
+    }
+
+    #[test]
+    fn test_parse_pointer_description_no_pointers() {
+        let (text, offsets) = parse_pointer_description("hello world");
+        assert_eq!(text, "hello world");
+        assert_eq!(offsets, Vec::<usize>::new());
+    }
+
     #[test]
     fn test_editor_scroll_cursor_in_view() {
         // Cursor at col 3, inner_width = 10: no scroll needed.
@@ -1218,62 +1269,62 @@ mod tests {
 
     #[test]
     fn test_word_left_from_middle_of_word() {
-        // "hello world" with cursor after "world" → lands at start of "world" (index 6)
-        assert_eq!(word_left_pos("hello world"), 6);
+        let (text, offsets) = parse_pointer_description("hello world\n      ^    ");
+        assert_eq!(word_left_pos(text), offsets[0]);
     }
 
     #[test]
     fn test_word_left_with_trailing_whitespace() {
-        // "hello world " with cursor after trailing space → lands at "w" (index 6)
-        assert_eq!(word_left_pos("hello world "), 6);
+        let (text, offsets) = parse_pointer_description("hello world \n      ^     ");
+        assert_eq!(word_left_pos(text), offsets[0]);
     }
 
     #[test]
     fn test_word_left_from_start_of_word() {
-        // "hello " with cursor right after the space → lands at "h" (index 0)
-        assert_eq!(word_left_pos("hello "), 0);
+        let (text, offsets) = parse_pointer_description("hello \n^     ");
+        assert_eq!(word_left_pos(text), offsets[0]);
     }
 
     #[test]
     fn test_word_left_at_beginning() {
-        // Empty before-cursor → stays at 0
-        assert_eq!(word_left_pos(""), 0);
+        let (text, offsets) = parse_pointer_description("\n^");
+        assert_eq!(word_left_pos(text), offsets[0]);
     }
 
     #[test]
     fn test_word_left_only_whitespace() {
-        // Only spaces before cursor → lands at 0
-        assert_eq!(word_left_pos("   "), 0);
+        let (text, offsets) = parse_pointer_description("   \n^  ");
+        assert_eq!(word_left_pos(text), offsets[0]);
     }
 
     #[test]
     fn test_word_right_from_start_of_word() {
-        // "hello world" cursor at 0 → jumps past "hello " to index 6
-        assert_eq!(word_right_pos("hello world"), 6);
+        let (text, offsets) = parse_pointer_description("hello world\n      ^    ");
+        assert_eq!(word_right_pos(text), offsets[0]);
     }
 
     #[test]
     fn test_word_right_from_whitespace() {
-        // " world" cursor at 0 (sitting on whitespace) → jumps to index 1 ("w")
-        assert_eq!(word_right_pos(" world"), 1);
+        let (text, offsets) = parse_pointer_description(" world\n ^    ");
+        assert_eq!(word_right_pos(text), offsets[0]);
     }
 
     #[test]
     fn test_word_right_at_last_word() {
-        // "world" with no trailing content → moves to end (len = 5)
-        assert_eq!(word_right_pos("world"), 5);
+        let (text, offsets) = parse_pointer_description("world\n     ^");
+        assert_eq!(word_right_pos(text), offsets[0]);
     }
 
     #[test]
     fn test_word_right_at_end() {
-        // Empty after-cursor → stays at 0
-        assert_eq!(word_right_pos(""), 0);
+        let (text, offsets) = parse_pointer_description("\n^");
+        assert_eq!(word_right_pos(text), offsets[0]);
     }
 
     #[test]
     fn test_word_right_only_whitespace() {
-        // Only spaces remaining → jumps to end
-        assert_eq!(word_right_pos("   "), 3);
+        let (text, offsets) = parse_pointer_description("   \n   ^");
+        assert_eq!(word_right_pos(text), offsets[0]);
     }
 
     #[test]
