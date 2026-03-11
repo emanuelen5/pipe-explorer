@@ -195,11 +195,7 @@ fn word_left_pos(before_cursor: &str) -> usize {
     while i > 0 && !chars[i - 1].1.is_whitespace() {
         i -= 1;
     }
-    if i == 0 {
-        0
-    } else {
-        chars[i].0
-    }
+    if i == 0 { 0 } else { chars[i].0 }
 }
 
 /// Return the byte offset within `after_cursor` where the next word begins.
@@ -854,7 +850,11 @@ impl App {
             KeyCode::Char('G') | KeyCode::End => {
                 let total = self.output_line_count();
                 self.view_mut().scroll = total.saturating_sub(self.visible_output_lines);
-                print!("total lines: {}, scroll set to: {}", total, self.view().scroll);
+                print!(
+                    "total lines: {}, scroll set to: {}",
+                    total,
+                    self.view().scroll
+                );
             }
 
             // Search
