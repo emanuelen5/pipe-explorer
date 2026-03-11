@@ -1196,7 +1196,12 @@ mod tests {
     /// # Example
     /// ```
     /// // "hello world" with first pointer at 'o' (offset 4) and second at 'h' (offset 0)
-    /// let (text, offsets) = parse_pointer_description("hello world\n    ^      \n^          ");
+    /// #[rustfmt::skip]
+    /// let (text, offsets) = parse_pointer_description(concat!(
+    ///     "hello world\n",
+    ///     "    ^      \n",
+    ///     "^          ",
+    /// ));
     /// assert_eq!(text, "hello world");
     /// assert_eq!(offsets, vec![4, 0]);
     /// ```
@@ -1210,15 +1215,23 @@ mod tests {
     #[test]
     fn test_parse_pointer_description_two_pointers() {
         // Example from the problem statement: first pointer at 'o' (offset 4), second at 'h' (offset 0)
-        let (text, offsets) =
-            parse_pointer_description("hello world\n    ^      \n^          ");
+        #[rustfmt::skip]
+        let (text, offsets) = parse_pointer_description(concat!(
+            "hello world\n",
+            "    ^      \n",
+            "^          ",
+        ));
         assert_eq!(text, "hello world");
         assert_eq!(offsets, vec![4, 0]);
     }
 
     #[test]
     fn test_parse_pointer_description_single_pointer() {
-        let (text, offsets) = parse_pointer_description("hello world\n      ^    ");
+        #[rustfmt::skip]
+        let (text, offsets) = parse_pointer_description(concat!(
+            "hello world\n",
+            "      ^    ",
+        ));
         assert_eq!(text, "hello world");
         assert_eq!(offsets, vec![6]);
     }
@@ -1269,61 +1282,101 @@ mod tests {
 
     #[test]
     fn test_word_left_from_middle_of_word() {
-        let (text, offsets) = parse_pointer_description("hello world\n      ^    ");
+        #[rustfmt::skip]
+        let (text, offsets) = parse_pointer_description(concat!(
+            "hello world\n",
+            "      ^    ",
+        ));
         assert_eq!(word_left_pos(text), offsets[0]);
     }
 
     #[test]
     fn test_word_left_with_trailing_whitespace() {
-        let (text, offsets) = parse_pointer_description("hello world \n      ^     ");
+        #[rustfmt::skip]
+        let (text, offsets) = parse_pointer_description(concat!(
+            "hello world \n",
+            "      ^     ",
+        ));
         assert_eq!(word_left_pos(text), offsets[0]);
     }
 
     #[test]
     fn test_word_left_from_start_of_word() {
-        let (text, offsets) = parse_pointer_description("hello \n^     ");
+        #[rustfmt::skip]
+        let (text, offsets) = parse_pointer_description(concat!(
+            "hello \n",
+            "^     ",
+        ));
         assert_eq!(word_left_pos(text), offsets[0]);
     }
 
     #[test]
     fn test_word_left_at_beginning() {
-        let (text, offsets) = parse_pointer_description("\n^");
+        #[rustfmt::skip]
+        let (text, offsets) = parse_pointer_description(concat!(
+            "\n",
+            "^",
+        ));
         assert_eq!(word_left_pos(text), offsets[0]);
     }
 
     #[test]
     fn test_word_left_only_whitespace() {
-        let (text, offsets) = parse_pointer_description("   \n^  ");
+        #[rustfmt::skip]
+        let (text, offsets) = parse_pointer_description(concat!(
+            "   \n",
+            "^  ",
+        ));
         assert_eq!(word_left_pos(text), offsets[0]);
     }
 
     #[test]
     fn test_word_right_from_start_of_word() {
-        let (text, offsets) = parse_pointer_description("hello world\n      ^    ");
+        #[rustfmt::skip]
+        let (text, offsets) = parse_pointer_description(concat!(
+            "hello world\n",
+            "      ^    ",
+        ));
         assert_eq!(word_right_pos(text), offsets[0]);
     }
 
     #[test]
     fn test_word_right_from_whitespace() {
-        let (text, offsets) = parse_pointer_description(" world\n ^    ");
+        #[rustfmt::skip]
+        let (text, offsets) = parse_pointer_description(concat!(
+            " world\n",
+            " ^    ",
+        ));
         assert_eq!(word_right_pos(text), offsets[0]);
     }
 
     #[test]
     fn test_word_right_at_last_word() {
-        let (text, offsets) = parse_pointer_description("world\n     ^");
+        #[rustfmt::skip]
+        let (text, offsets) = parse_pointer_description(concat!(
+            "world\n",
+            "     ^",
+        ));
         assert_eq!(word_right_pos(text), offsets[0]);
     }
 
     #[test]
     fn test_word_right_at_end() {
-        let (text, offsets) = parse_pointer_description("\n^");
+        #[rustfmt::skip]
+        let (text, offsets) = parse_pointer_description(concat!(
+            "\n",
+            "^",
+        ));
         assert_eq!(word_right_pos(text), offsets[0]);
     }
 
     #[test]
     fn test_word_right_only_whitespace() {
-        let (text, offsets) = parse_pointer_description("   \n   ^");
+        #[rustfmt::skip]
+        let (text, offsets) = parse_pointer_description(concat!(
+            "   \n",
+            "   ^",
+        ));
         assert_eq!(word_right_pos(text), offsets[0]);
     }
 
