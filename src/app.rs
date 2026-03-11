@@ -1189,7 +1189,7 @@ mod tests {
     /// Parses a text description with pointer indicators, used in tests to visually describe
     /// a string and byte offsets into it.
     ///
-    /// The first line of `description` is the text. Each subsequent line may contain a `^`
+    /// The first line of `description` is the text. The two subsequent lines must contain a `^`
     /// character; the column position of `^` gives the corresponding byte offset into the
     /// text. Offsets are returned in the order the pointer lines appear.
     ///
@@ -1197,57 +1197,112 @@ mod tests {
     /// ```
     /// // "hello world" with first pointer at 'o' (offset 4) and second at 'h' (offset 0)
     /// #[rustfmt::skip]
-    /// let (text, offsets) = parse_pointer_description(concat!(
+    /// let (text, input, before, after) = parse_pointer_description(concat!(
     ///     "hello world\n",
     ///     "    ^      \n",
     ///     "^          ",
     /// ));
-    /// assert_eq!(text, "hello world");
-    /// assert_eq!(offsets, vec![4, 0]);
+    /// assert_cursor(text, before, after);
     /// ```
-    fn parse_pointer_description(description: &str) -> (&str, Vec<usize>) {
-        let mut lines = description.lines();
-        let text = lines.next().unwrap_or("");
-        let offsets = lines.filter_map(|line| line.find('^')).collect();
-        (text, offsets)
+    fn parse_pointer_description<'a>(
+        description: &'a str,
+        cursor_before: &'a str,
+        cursor_after: &'a str,
+    ) -> (&'a str, &'a str, usize, usize) {
+        // Make sure it's on a single line
+        assert!(description.lines().count() == 1);
+        let before_caret = cursor_before
+            .find('^')
+            .expect("cursor_before must contain '^'");
+        let after_caret = cursor_after
+            .find('^')
+            .expect("cursor_after must contain '^'");
+        assert!(
+            before_caret < description.len() + 1,
+            "cursor_before '^' must be within description"
+        );
+        assert!(
+            after_caret < description.len() + 1,
+            "cursor_after '^' must be within description"
+        );
+        // Include final character
+        if before_caret == after_caret {
+            (description, "", before_caret, after_caret)
+        } else if after_caret < before_caret {
+            (
+                description,
+                &description[0..before_caret],
+                before_caret,
+                after_caret,
+            )
+        } else {
+            (
+                description,
+                &description[before_caret..],
+                before_caret,
+                after_caret,
+            )
+        }
     }
 
-    #[test]
-    fn test_parse_pointer_description_two_pointers() {
-        // Example from the problem statement: first pointer at 'o' (offset 4), second at 'h' (offset 0)
+    fn assert_cursor(text: &str, cursor_expected: usize, cursor_actual: usize) {
+        if cursor_expected == cursor_actual {
+            return;
+        }
+
+        let cursor_1 = " ".repeat(cursor_expected) + "^";
+        let cursor_2 = " ".repeat(cursor_actual) + "^";
         #[rustfmt::skip]
-        let (text, offsets) = parse_pointer_description(concat!(
-            "hello world\n",
-            "    ^      \n",
-            "^          ",
-        ));
-        assert_eq!(text, "hello world");
-        assert_eq!(offsets, vec![4, 0]);
+        panic!(concat!(
+            "Expected cursor:\n",
+            "  \"{}\"\n",
+            "   {}\n",
+            "Actual cursor:\n",
+            "  \"{}\"\n",
+            "   {}\n"
+        ), text, cursor_1, text, cursor_2);
     }
 
     #[test]
-    fn test_parse_pointer_description_single_pointer() {
+    fn test_parse_pointer_description_goes_to_left() {
         #[rustfmt::skip]
-        let (text, offsets) = parse_pointer_description(concat!(
-            "hello world\n",
-            "      ^    ",
-        ));
+        let (text, input, before, after) = parse_pointer_description(
+            "hello world",
+            "    ^      ",
+            " ^         ",
+        );
         assert_eq!(text, "hello world");
-        assert_eq!(offsets, vec![6]);
+        assert_eq!(input, "hell");
+        assert_eq!(before, 4);
+        assert_eq!(after, 1);
     }
 
     #[test]
-    fn test_parse_pointer_description_empty_text() {
-        let (text, offsets) = parse_pointer_description("\n^");
-        assert_eq!(text, "");
-        assert_eq!(offsets, vec![0]);
+    fn test_parse_pointer_description_goes_to_right() {
+        #[rustfmt::skip]
+        let (text, input, before, after) = parse_pointer_description(
+            "hello world",
+            "   ^       ",
+            "     ^     ",
+        );
+        assert_eq!(text, "hello world");
+        assert_eq!(input, "lo world");
+        assert_eq!(before, 3);
+        assert_eq!(after, 5);
     }
 
     #[test]
-    fn test_parse_pointer_description_no_pointers() {
-        let (text, offsets) = parse_pointer_description("hello world");
+    fn test_parse_pointer_no_change() {
+        #[rustfmt::skip]
+        let (text, input, before, after) = parse_pointer_description(
+            "hello world",
+            "    ^      ",
+            "    ^      ",
+        );
         assert_eq!(text, "hello world");
-        assert_eq!(offsets, Vec::<usize>::new());
+        assert_eq!(input, "");
+        assert_eq!(before, 4);
+        assert_eq!(after, 4);
     }
 
     #[test]
@@ -1283,137 +1338,167 @@ mod tests {
     #[test]
     fn test_word_left_from_middle_of_word() {
         #[rustfmt::skip]
-        let (text, offsets) = parse_pointer_description(concat!(
-            "hello world\n",
+        let (text, input, _before, after) = parse_pointer_description(
+            "hello world",
+            "         ^ ",
             "      ^    ",
-        ));
-        assert_eq!(word_left_pos(text), offsets[0]);
+        );
+        assert_cursor(text, after, word_left_pos(input));
     }
 
     #[test]
     fn test_word_left_with_trailing_whitespace() {
         #[rustfmt::skip]
-        let (text, offsets) = parse_pointer_description(concat!(
-            "hello world \n",
+        let (text, input, _before, after) = parse_pointer_description(
+            "hello world ",
+            "           ^",
             "      ^     ",
-        ));
-        assert_eq!(word_left_pos(text), offsets[0]);
+        );
+        assert_cursor(text, after, word_left_pos(input));
     }
 
     #[test]
     fn test_word_left_from_start_of_word() {
         #[rustfmt::skip]
-        let (text, offsets) = parse_pointer_description(concat!(
-            "hello \n",
-            "^     ",
-        ));
-        assert_eq!(word_left_pos(text), offsets[0]);
+        let (text, input, _before, after) = parse_pointer_description(
+            "hello world",
+            "     ^",
+            "^     "
+        );
+        assert_cursor(text, after, word_left_pos(input));
     }
 
     #[test]
     fn test_word_left_at_beginning() {
         #[rustfmt::skip]
-        let (text, offsets) = parse_pointer_description(concat!(
-            "\n",
-            "^",
-        ));
-        assert_eq!(word_left_pos(text), offsets[0]);
+        let (text, input, _before, after) = parse_pointer_description(
+            "hello world",
+            "^          ",
+            "^          ",
+        );
+        assert_cursor(text, after, word_left_pos(input));
     }
 
     #[test]
     fn test_word_left_only_whitespace() {
         #[rustfmt::skip]
-        let (text, offsets) = parse_pointer_description(concat!(
-            "   \n",
-            "^  ",
-        ));
-        assert_eq!(word_left_pos(text), offsets[0]);
+        let (text, input, _before, after) = parse_pointer_description(
+            "           ",
+            "        ^  ",
+            "^          ",
+        );
+        assert_cursor(text, after, word_left_pos(input));
     }
 
     #[test]
     fn test_word_right_from_start_of_word() {
         #[rustfmt::skip]
-        let (text, offsets) = parse_pointer_description(concat!(
-            "hello world\n",
-            "      ^    ",
-        ));
-        assert_eq!(word_right_pos(text), offsets[0]);
+        let (text, input, before, after) = parse_pointer_description(
+            "hello world",
+            "^          ",
+            "      ^     ",
+        );
+        assert_cursor(text, after, before + word_right_pos(input));
     }
 
     #[test]
     fn test_word_right_from_whitespace() {
         #[rustfmt::skip]
-        let (text, offsets) = parse_pointer_description(concat!(
-            " world\n",
-            " ^    ",
-        ));
-        assert_eq!(word_right_pos(text), offsets[0]);
+        let (text, input, before, after) = parse_pointer_description(
+            "hello world ",
+            "      ^     ",
+            "            ^",
+        );
+        assert_cursor(text, after, before + word_right_pos(input));
     }
 
     #[test]
     fn test_word_right_at_last_word() {
         #[rustfmt::skip]
-        let (text, offsets) = parse_pointer_description(concat!(
-            "world\n",
-            "     ^",
-        ));
-        assert_eq!(word_right_pos(text), offsets[0]);
+        let (text, input, before, after) = parse_pointer_description(
+            "hello world",
+            "      ^    ",
+            "           ^",
+        );
+        assert_cursor(text, after, before + word_right_pos(input));
     }
 
     #[test]
     fn test_word_right_at_end() {
         #[rustfmt::skip]
-        let (text, offsets) = parse_pointer_description(concat!(
-            "\n",
-            "^",
-        ));
-        assert_eq!(word_right_pos(text), offsets[0]);
+        let (text, input, before, after) = parse_pointer_description(
+            "hello world",
+            "           ^",
+            "           ^",
+        );
+        assert_cursor(text, after, before + word_right_pos(input));
     }
 
     #[test]
     fn test_word_right_only_whitespace() {
         #[rustfmt::skip]
-        let (text, offsets) = parse_pointer_description(concat!(
-            "   \n",
-            "   ^",
-        ));
-        assert_eq!(word_right_pos(text), offsets[0]);
+        let (text, input, before, after) = parse_pointer_description(
+            "           ",
+            "  ^        ",
+            "           ^",
+        );
+        assert_cursor(text, after, before + word_right_pos(input));
     }
 
     #[test]
     fn test_editor_ctrl_left_jumps_to_word_start() {
-        let mut editor = EditorState::new("hello world".to_string());
-        // cursor starts at end (11)
+        let (text, _input, before, after) = parse_pointer_description(
+            "hello world",
+            "           ^",
+            "      ^     ",
+        );
+        let mut editor = EditorState::new(text.to_string());
+        editor.cursor = before;
         let key = KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL);
         editor.handle_key(key);
-        assert_eq!(editor.cursor, 6); // start of "world"
+        assert_eq!(editor.cursor, after);
     }
 
     #[test]
     fn test_editor_ctrl_right_jumps_to_next_word_start() {
-        let mut editor = EditorState::new("hello world".to_string());
-        editor.cursor = 0;
+        let (text, _input, before, after) = parse_pointer_description(
+            "hello world",
+            "^          ",
+            "      ^     ",
+        );
+        let mut editor = EditorState::new(text.to_string());
+        editor.cursor = before;
         let key = KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL);
         editor.handle_key(key);
-        assert_eq!(editor.cursor, 6); // start of "world"
+        assert_eq!(editor.cursor, after);
     }
 
     #[test]
     fn test_editor_ctrl_left_at_beginning_stays() {
-        let mut editor = EditorState::new("hello".to_string());
-        editor.cursor = 0;
+        let (text, _input, before, after) = parse_pointer_description(
+            "hello world",
+            "^          ",
+            "^           ",
+        );
+        let mut editor = EditorState::new(text.to_string());
+        editor.cursor = before;
         let key = KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL);
         editor.handle_key(key);
-        assert_eq!(editor.cursor, 0);
+        assert_eq!(editor.cursor, after);
     }
 
     #[test]
     fn test_editor_ctrl_right_at_end_stays() {
-        let mut editor = EditorState::new("hello".to_string());
-        // cursor already at end
+        let (text, _input, before, after) = parse_pointer_description(
+            "hello world",
+            "           ^",
+            "           ^",
+        );
+        let mut editor = EditorState::new(text.to_string());
+        editor.cursor = before;
         let key = KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL);
         editor.handle_key(key);
-        assert_eq!(editor.cursor, 5);
+        assert_eq!(editor.cursor, after);
     }
 
     /// Navigate left preserves all stage_outputs (no exec triggered).
