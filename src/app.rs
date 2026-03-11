@@ -647,15 +647,29 @@ impl App {
         };
     }
 
-    /// Confirm an edit and update the pipeline stage.
-    pub fn confirm_edit(&mut self) {
-        if let AppMode::Editing { editor, .. } = std::mem::replace(&mut self.mode, AppMode::Normal)
-        {
+    pub fn update_edit(&mut self) {
+        // Use the current text and execute it in the stage, without closing the editor
+        if let AppMode::Editing { editor, .. } = &mut self.mode {
             if let Some(stage) = self.pipeline.selected_stage_mut() {
-                stage.command = editor.content;
+                stage.command = editor.content.clone();
             }
         }
         self.trigger_exec(false);
+    }
+
+    /// Confirm an edit and update the pipeline stage.
+    pub fn confirm_edit(&mut self) {
+        let mut is_modified = false;
+        if let AppMode::Editing { editor, .. } = std::mem::replace(&mut self.mode, AppMode::Normal)
+        {
+            if let Some(stage) = self.pipeline.selected_stage_mut() {
+                is_modified = stage.command != editor.content;
+                stage.command = editor.content;
+            }
+        }
+        if is_modified {
+            self.trigger_exec(false);
+        }
     }
 
     /// Cancel editing.
@@ -886,6 +900,7 @@ impl App {
     fn handle_editor_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Esc => self.cancel_edit(),
+            KeyCode::Tab => self.update_edit(),
             KeyCode::Enter => {
                 if matches!(self.mode, AppMode::Editing { .. }) {
                     self.confirm_edit();
