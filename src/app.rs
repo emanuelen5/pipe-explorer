@@ -580,6 +580,18 @@ impl App {
     /// same line are visited one by one.  If the user has scrolled away, jump
     /// to the first match *after* the current scroll position.
     pub fn search_next(&mut self) {
+        // If the query is empty, use the last search from history (if any) so
+        // that 'n' can repeat the last search.
+        if self.view().search.query.is_empty() {
+            if let Some(last) = self.search_history.last() {
+                let view = self.view_mut();
+                view.search.query = last.clone();
+                view.search.cursor = last.len();
+                self.compute_search_matches();
+            } else {
+                return;
+            }
+        }
         let view = self.view_mut();
         if view.search.matches.is_empty() {
             return;
@@ -611,6 +623,19 @@ impl App {
     /// Same logic as `search_next` but in reverse: sequential step when on
     /// the current match's line, binary search when the user has scrolled away.
     pub fn search_prev(&mut self) {
+        // If the query is empty, use the last search from history (if any) so
+        // that 'n' can repeat the last search.
+        if self.view().search.query.is_empty() {
+            if let Some(last) = self.search_history.last() {
+                let view = self.view_mut();
+                view.search.query = last.clone();
+                view.search.cursor = last.len();
+                self.compute_search_matches();
+            } else {
+                return;
+            }
+        }
+
         let view = self.view_mut();
         if view.search.matches.is_empty() {
             return;

@@ -211,6 +211,11 @@ impl SearchHistory {
         self.modifications.remove(&idx);
         Some(self.entries[idx].clone())
     }
+
+    /// Get the most recent search
+    pub fn last(&self) -> Option<String> {
+        self.entries.last().cloned()
+    }
 }
 
 #[cfg(test)]
