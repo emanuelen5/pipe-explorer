@@ -331,6 +331,19 @@ fn test_editor_ctrl_right_at_end_stays() {
     assert_eq!(editor.cursor, after);
 }
 
+#[test]
+fn test_editor_backspace_multibyte_char() {
+    // '│' is a 3-byte UTF-8 character (U+2502, bytes E2 94 82).
+    // Cursor placed right after it; backspace should remove the whole character.
+    let mut editor = EditorState::new("a│b".to_string());
+    // cursor after '│': 'a' = 1 byte, '│' = 3 bytes → byte offset 4
+    editor.cursor = 4;
+    let key = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
+    editor.handle_key(key);
+    assert_eq!(editor.content, "ab");
+    assert_eq!(editor.cursor, 1);
+}
+
 /// Navigate left preserves all stage_outputs (no exec triggered).
 #[tokio::test]
 async fn test_navigate_left_preserves_stage_outputs() {

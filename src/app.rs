@@ -80,9 +80,14 @@ impl EditorState {
         match key.code {
             KeyCode::Backspace => {
                 if self.cursor > 0 {
-                    let pos = self.cursor - 1;
-                    self.content.remove(pos);
-                    self.cursor = pos;
+                    // Find previous char boundary (handles multi-byte characters)
+                    let prev = self.content[..self.cursor]
+                        .char_indices()
+                        .last()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    self.content.remove(prev);
+                    self.cursor = prev;
                 }
             }
             KeyCode::Delete => {
