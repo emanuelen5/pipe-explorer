@@ -97,6 +97,7 @@ pub struct SearchHistory {
     modifications: std::collections::HashMap<usize, String>,
 }
 
+#[cfg(test)]
 impl SearchHistory {
     /// Return the number of stored entries.
     #[must_use]
@@ -109,7 +110,9 @@ impl SearchHistory {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+}
 
+impl SearchHistory {
     /// Push `query` to the front of the history, deduplicating it.
     ///
     /// Empty queries are silently ignored. Also resets navigation so the next
