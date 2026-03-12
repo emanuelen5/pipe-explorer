@@ -351,6 +351,22 @@ impl App {
         });
     }
 
+    /// Cancel any in-flight execution and silence stale streaming messages.
+    ///
+    /// Sets the current cancel token, resets it for future use, and replaces
+    /// `exec_rx` with a fresh dummy channel so that any `StreamMsg` still in
+    /// flight from the cancelled run are discarded rather than processed.
+    /// Also marks `running` as `false`.
+    fn cancel_in_flight_execution(&mut self) {
+        self.cancel_token.store(true, Ordering::Relaxed);
+        self.cancel_token = Arc::new(AtomicBool::new(false));
+        // Drop the old receiver — the bridge thread will fail on its next send
+        // and exit, silencing any stale StreamMsg still in flight.
+        let (_dummy_tx, new_rx) = mpsc::channel::<StreamMsg>(1);
+        self.exec_rx = new_rx;
+        self.running = false;
+    }
+
     /// Change the output mode of a given stage.
     ///
     /// When the mode changes for stage `stage_idx`, any downstream stage outputs
@@ -384,6 +400,11 @@ impl App {
                 new_stderr,
                 new_combined,
             } => {
+                // Discard stale updates from a previous execution that was
+                // in flight when all stages were deleted.
+                if self.pipeline.is_empty() {
+                    return false;
+                }
                 // Grow stage_outputs if an earlier cached stage sent data
                 // before the streaming stages fully initialised.
                 while self.stage_outputs.len() <= stage_idx {
@@ -830,6 +851,7 @@ impl App {
                         if !self.pipeline.is_empty() {
                             self.trigger_exec(false);
                         } else {
+                            self.cancel_in_flight_execution();
                             self.stage_outputs.clear();
                         }
                     } else {
@@ -960,6 +982,7 @@ impl App {
                 if !self.pipeline.is_empty() {
                     self.trigger_exec(false);
                 } else {
+                    self.cancel_in_flight_execution();
                     self.stage_outputs.clear();
                 }
             }

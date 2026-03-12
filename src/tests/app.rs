@@ -808,3 +808,82 @@ async fn test_g_key_jumps_to_correct_bottom() {
     app.handle_event(make_key(KeyCode::Char('k')));
     assert_eq!(app.view().scroll, 7, "k after G should reach 6");
 }
+
+// ---------------------------------------------------------------
+// Stage deletion tests
+// ---------------------------------------------------------------
+
+/// Deleting the only stage clears stage_outputs and stops running.
+#[tokio::test]
+async fn test_delete_last_stage_clears_outputs() {
+    let pipeline = parse_pipeline("echo a");
+    let mut app = App::new(pipeline);
+
+    app.stage_outputs = vec![make_stage_output("a\n")];
+    app.running = true;
+
+    // Press 'd' to delete the only stage.
+    app.handle_event(make_key(KeyCode::Char('d')));
+
+    assert!(app.pipeline.is_empty(), "pipeline should be empty");
+    assert!(app.stage_outputs.is_empty(), "stage_outputs should be cleared");
+    assert!(!app.running, "running should be false after deleting all stages");
+}
+
+/// After deleting all stages, a stale StageUpdate message must not
+/// re-populate stage_outputs (the output pane must stay blank).
+#[tokio::test]
+async fn test_stale_stage_update_ignored_when_pipeline_empty() {
+    let pipeline = parse_pipeline("echo a");
+    let mut app = App::new(pipeline);
+
+    app.stage_outputs = vec![make_stage_output("a\n")];
+
+    // Delete the only stage.
+    app.handle_event(make_key(KeyCode::Char('d')));
+    assert!(app.pipeline.is_empty());
+    assert!(app.stage_outputs.is_empty());
+
+    // Simulate a stale StreamMsg::StageUpdate arriving from the old execution.
+    let stale = StreamMsg::StageUpdate {
+        stage_idx: 0,
+        new_stdout: b"old output\n".to_vec(),
+        new_stderr: vec![],
+        new_combined: vec![],
+    };
+    app.handle_stream_msg(stale);
+
+    // stage_outputs must remain empty; old data must not appear.
+    assert!(
+        app.stage_outputs.is_empty(),
+        "stale StageUpdate must not populate stage_outputs after all stages are deleted"
+    );
+    assert_eq!(app.current_output_text(), "");
+}
+
+/// Deleting the last stage via the confirm-delete path also clears outputs
+/// and stops the running flag.
+#[tokio::test]
+async fn test_confirm_delete_then_immediate_delete_clears_outputs() {
+    let pipeline = parse_pipeline("echo a | echo b");
+    let mut app = App::new(pipeline);
+
+    app.stage_outputs = vec![make_stage_output("a\n"), make_stage_output("b\n")];
+    app.pipeline.selected = 0; // select first (non-last) stage
+
+    // Delete first stage — goes to ConfirmingDelete mode.
+    app.handle_event(make_key(KeyCode::Char('d')));
+    assert!(matches!(app.mode, AppMode::ConfirmingDelete));
+
+    // Confirm the delete with 'y'.
+    app.handle_event(make_key(KeyCode::Char('y')));
+    assert_eq!(app.pipeline.len(), 1, "one stage should remain after confirm delete");
+    assert!(app.running, "exec should be triggered for the remaining stage");
+
+    // Now delete the last remaining stage (immediate delete, no confirm).
+    app.handle_event(make_key(KeyCode::Char('d')));
+
+    assert!(app.pipeline.is_empty(), "pipeline should be empty");
+    assert!(app.stage_outputs.is_empty(), "stage_outputs should be cleared");
+    assert!(!app.running, "running should be false after deleting all stages");
+}
