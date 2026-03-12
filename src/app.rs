@@ -14,7 +14,7 @@ use crate::ansi::AnsiLineIndex;
 pub use crate::executor::OutputMode;
 use crate::executor::{ExecutorCache, StageOutput, StreamMsg, run_pipeline_streaming};
 use crate::pipeline::Pipeline;
-use crate::search::SearchState;
+use crate::search::{SearchHistory, SearchState};
 use crate::ui;
 
 /// Per-stage view state (output mode, search, scroll position).
@@ -181,6 +181,8 @@ pub struct App {
     exec_rx: mpsc::Receiver<StreamMsg>,
     /// Number of visible lines in the output pane (updated each frame by the renderer).
     pub visible_output_lines: usize,
+    /// Search history shared across all pipeline stages.
+    pub search_history: SearchHistory,
 }
 
 /// Return the byte offset within `before_cursor` where the previous word begins.
@@ -280,6 +282,7 @@ impl App {
             exec_tx,
             exec_rx,
             visible_output_lines: 1, // Minimum value
+            search_history: SearchHistory::default(),
         }
     }
 
@@ -537,11 +540,14 @@ impl App {
     /// Enter search mode, clearing any previous query.
     pub fn start_search(&mut self) {
         self.view_mut().search.clear();
+        self.search_history.reset_navigation();
         self.mode = AppMode::Searching;
     }
 
     /// Confirm the search query and compute matches.
     pub fn confirm_search(&mut self) {
+        let query = self.view().search.query.clone();
+        self.search_history.push(&query);
         self.compute_search_matches();
         self.mode = AppMode::Normal;
         // Jump to the first match at or after the current scroll position,
@@ -563,6 +569,7 @@ impl App {
     /// Cancel search and clear all highlights.
     pub fn cancel_search(&mut self) {
         self.view_mut().search.clear();
+        self.search_history.reset_navigation();
         self.mode = AppMode::Normal;
     }
 
@@ -944,6 +951,32 @@ impl App {
         match key.code {
             KeyCode::Esc => self.cancel_search(),
             KeyCode::Enter => self.confirm_search(),
+            KeyCode::Up => {
+                let current = self.view().search.query.clone();
+                if let Some(text) = self.search_history.navigate_up(&current) {
+                    let len = text.len();
+                    let view = self.view_mut();
+                    view.search.query = text;
+                    view.search.cursor = len;
+                }
+            }
+            KeyCode::Down => {
+                let current = self.view().search.query.clone();
+                if let Some(text) = self.search_history.navigate_down(&current) {
+                    let len = text.len();
+                    let view = self.view_mut();
+                    view.search.query = text;
+                    view.search.cursor = len;
+                }
+            }
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::ALT) => {
+                if let Some(text) = self.search_history.revert_current() {
+                    let len = text.len();
+                    let view = self.view_mut();
+                    view.search.query = text;
+                    view.search.cursor = len;
+                }
+            }
             KeyCode::Backspace => {
                 let view = self.view_mut();
                 if view.search.cursor > 0 {
@@ -985,7 +1018,10 @@ impl App {
                 let len = self.view().search.query.len();
                 self.view_mut().search.cursor = len;
             }
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char(c)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
                 let view = self.view_mut();
                 view.search.query.insert(view.search.cursor, c);
                 view.search.cursor += c.len_utf8();
