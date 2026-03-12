@@ -214,7 +214,7 @@ impl SearchHistory {
 
     /// Get the most recent search
     pub fn last(&self) -> Option<String> {
-        self.entries.last().cloned()
+        self.entries.first().cloned()
     }
 }
 
