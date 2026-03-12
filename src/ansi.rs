@@ -452,4 +452,5 @@ pub fn ansi_text_to_visible_lines(
 }
 
 #[cfg(test)]
+#[path = "tests/ansi.rs"]
 mod tests;

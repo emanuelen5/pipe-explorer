@@ -219,4 +219,5 @@ impl SearchHistory {
 }
 
 #[cfg(test)]
+#[path = "tests/search.rs"]
 mod tests;

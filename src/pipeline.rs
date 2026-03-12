@@ -132,4 +132,5 @@ fn split_pipeline_stages(s: &str) -> Vec<&str> {
 }
 
 #[cfg(test)]
+#[path = "tests/pipeline.rs"]
 mod tests;

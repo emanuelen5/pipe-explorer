@@ -792,4 +792,5 @@ pub fn run_pipeline_streaming(
 
 
 #[cfg(test)]
+#[path = "tests/executor.rs"]
 mod tests;

@@ -1243,4 +1243,5 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Re
 }
 
 #[cfg(test)]
+#[path = "tests/app.rs"]
 mod tests;
