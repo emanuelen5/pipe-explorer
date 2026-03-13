@@ -1,6 +1,20 @@
 use super::*;
 
 #[test]
+fn test_get_shell_uses_shell_env_var() {
+    // When $SHELL is present, get_shell_from_env returns that value.
+    let shell = get_shell_from_env(|k| (k == "SHELL").then(|| "/bin/bash".to_string()));
+    assert_eq!(shell, "/bin/bash");
+}
+
+#[test]
+fn test_get_shell_fallback() {
+    // When $SHELL is absent, get_shell_from_env falls back to "sh".
+    let shell = get_shell_from_env(|_| None);
+    assert_eq!(shell, "sh");
+}
+
+#[test]
 fn test_run_command_echo() {
     let mut cache = ExecutorCache::new();
     let out = cache.run("echo hello", b"", false).unwrap();

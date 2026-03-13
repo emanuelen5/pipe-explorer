@@ -346,7 +346,7 @@ fn read_to_channel(mut reader: impl Read, is_stderr: bool, tx: std_mpsc::Sender<
 
 #[cfg(test)]
 fn run_shell_command(command: &str, stdin_bytes: &[u8]) -> anyhow::Result<StageOutput> {
-    let mut child = Command::new("sh")
+    let mut child = Command::new(get_shell())
         .arg("-c")
         .arg(command)
         // Hint and encourage color output so ANSI can be rendered in the TUI.
@@ -475,9 +475,24 @@ pub enum StreamMsg {
 /// The minimum interval between UI update messages for each stage.
 const UI_THROTTLE: Duration = Duration::from_millis(100);
 
+/// Return the path to the shell that should be used for spawning commands.
+///
+/// Reads `$SHELL` from the environment (set by the user's login shell on
+/// Unix-like systems) and falls back to `"sh"` when the variable is absent.
+fn get_shell() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string())
+}
+
+/// Inner implementation of [`get_shell`] that accepts an arbitrary environment
+/// lookup, making it straightforward to test without mutating process state.
+#[cfg(test)]
+fn get_shell_from_env(lookup: impl Fn(&str) -> Option<String>) -> String {
+    lookup("SHELL").unwrap_or_else(|| "sh".to_string())
+}
+
 /// Spawn a child process for the given shell command.
 fn spawn_shell(command: &str) -> anyhow::Result<std::process::Child> {
-    Ok(Command::new("sh")
+    Ok(Command::new(get_shell())
         .arg("-c")
         .arg(command)
         .env("TERM", "xterm-256color")
