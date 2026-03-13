@@ -1,6 +1,59 @@
 use super::*;
 
 #[test]
+fn test_is_shell_path_recognises_common_shells() {
+    for path in &[
+        "/bin/sh",
+        "/bin/bash",
+        "/usr/bin/zsh",
+        "/usr/bin/fish",
+        "/bin/dash",
+        "/usr/bin/ksh",
+        "/bin/ash",
+        "/usr/local/bin/bash",
+    ] {
+        assert!(is_shell_path(path), "{path} should be recognised as a shell");
+    }
+}
+
+#[test]
+fn test_is_shell_path_rejects_non_shells() {
+    for path in &[
+        "/usr/bin/cargo",
+        "/usr/bin/python3",
+        "/usr/bin/node",
+        "",
+        "/usr/bin/grep",
+    ] {
+        assert!(
+            !is_shell_path(path),
+            "{path} should not be recognised as a shell"
+        );
+    }
+}
+
+/// Verify that `get_parent_shell()` either returns a valid shell path or `None`.
+///
+/// This test is Linux-only because that platform's `/proc` filesystem provides
+/// a straightforward way to inspect process exe paths.  The macOS
+/// implementation (via `proc_pidpath`) is only exercised in integration/release
+/// builds; CI tests run exclusively on Linux.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_get_parent_shell_is_shell_or_none() {
+    if let Some(shell) = get_parent_shell() {
+        assert!(
+            std::path::Path::new(&shell).exists(),
+            "detected shell path does not exist: {shell}"
+        );
+        assert!(
+            is_shell_path(&shell),
+            "detected parent shell '{shell}' does not look like a shell"
+        );
+    }
+}
+
+#[test]
 fn test_run_command_echo() {
     let mut cache = ExecutorCache::new();
     let out = cache.run("echo hello", b"", false).unwrap();

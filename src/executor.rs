@@ -346,7 +346,7 @@ fn read_to_channel(mut reader: impl Read, is_stderr: bool, tx: std_mpsc::Sender<
 
 #[cfg(test)]
 fn run_shell_command(command: &str, stdin_bytes: &[u8]) -> anyhow::Result<StageOutput> {
-    let mut child = Command::new("sh")
+    let mut child = Command::new(get_shell())
         .arg("-c")
         .arg(command)
         // Hint and encourage color output so ANSI can be rendered in the TUI.
@@ -475,9 +475,88 @@ pub enum StreamMsg {
 /// The minimum interval between UI update messages for each stage.
 const UI_THROTTLE: Duration = Duration::from_millis(100);
 
+/// Return the path to the shell that should be used for spawning commands.
+///
+/// Tries to detect the parent process's actual shell executable, then falls
+/// back to `$SHELL`, and finally to `"sh"`.
+fn get_shell() -> String {
+    get_parent_shell()
+        .or_else(|| std::env::var("SHELL").ok())
+        .unwrap_or_else(|| "sh".to_string())
+}
+
+/// Return `true` when `path` looks like a Unix shell executable.
+///
+/// The heuristic checks whether the file-name component ends with `"sh"`
+/// (covers `bash`, `zsh`, `fish`, `dash`, `ash`, `ksh`, `tcsh`, `csh`, `sh`,
+/// etc.).  The check is intentionally loose so that unusual shell names still
+/// work, while programs like `cargo` or `python` are correctly rejected.
+fn is_shell_path(path: &str) -> bool {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.ends_with("sh"))
+        .unwrap_or(false)
+}
+
+/// Attempt to identify the shell executable that is the parent of the current
+/// process by inspecting the parent process directly.
+///
+/// Returns `None` when the lookup is not supported on the current platform,
+/// when any OS call fails, or when the parent process is not a shell; the
+/// caller should fall back to `$SHELL` / `"sh"`.
+#[cfg(target_os = "linux")]
+fn get_parent_shell() -> Option<String> {
+    // Parse the parent PID from /proc/self/status (no unsafe required).
+    let ppid: u32 = std::fs::read_to_string("/proc/self/status")
+        .ok()?
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("PPid:")
+                .and_then(|s| s.trim().parse().ok())
+        })?;
+    // Resolve the parent's executable via the /proc symlink.
+    let exe = std::fs::read_link(format!("/proc/{ppid}/exe"))
+        .ok()
+        .and_then(|p| p.to_str().map(String::from))?;
+    if is_shell_path(&exe) { Some(exe) } else { None }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn getppid() -> i32;
+    // Declared in <libproc.h>; available in libSystem (always linked on macOS).
+    fn proc_pidpath(pid: i32, buffer: *mut u8, buffersize: u32) -> i32;
+}
+
+#[cfg(target_os = "macos")]
+fn get_parent_shell() -> Option<String> {
+    // PROC_PIDPATHINFO_MAXSIZE = 4 * MAXPATHLEN (4 * 1024) from <libproc.h>.
+    const PROC_PIDPATHINFO_MAXSIZE: usize = 4096;
+    let mut buf = vec![0u8; PROC_PIDPATHINFO_MAXSIZE];
+    let ppid = unsafe { getppid() };
+    let ret = unsafe { proc_pidpath(ppid, buf.as_mut_ptr(), buf.len() as u32) };
+    if ret <= 0 {
+        return None;
+    }
+    // Use the null terminator position when present; otherwise clamp to the
+    // number of bytes actually written (ret), bounded by the buffer length.
+    let len = buf
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or((ret as usize).min(buf.len()));
+    let exe = String::from_utf8(buf[..len].to_vec()).ok()?;
+    if is_shell_path(&exe) { Some(exe) } else { None }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn get_parent_shell() -> Option<String> {
+    None
+}
+
 /// Spawn a child process for the given shell command.
 fn spawn_shell(command: &str) -> anyhow::Result<std::process::Child> {
-    Ok(Command::new("sh")
+    Ok(Command::new(get_shell())
         .arg("-c")
         .arg(command)
         .env("TERM", "xterm-256color")
