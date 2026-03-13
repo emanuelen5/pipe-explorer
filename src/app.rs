@@ -821,7 +821,7 @@ impl App {
             }
 
             // Add new stage
-            KeyCode::Char('o') => {
+            KeyCode::Char('o') | KeyCode::Char('|') => {
                 self.pipeline.insert_after_selected();
                 self.sync_stage_views();
                 self.start_editing();
