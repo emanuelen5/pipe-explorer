@@ -1143,7 +1143,11 @@ impl App {
                 }
             }
             _ => {
-                editor.handle_key(key);
+                if editor.content.len() == 0 && key.code == KeyCode::Backspace {
+                    self.mode = AppMode::Normal;
+                } else {
+                    editor.handle_key(key);
+                }
             }
         }
         false
