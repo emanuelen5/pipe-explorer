@@ -206,6 +206,7 @@ fn mode_for_stage(app: &App, stage_idx: usize) -> OutputMode {
 fn render_output(frame: &mut Frame, app: &mut App, area: Rect) {
     const BORDER_SIZE: u16 = 2;
     app.visible_output_lines = area.height.saturating_sub(BORDER_SIZE).max(1) as usize;
+    app.visible_output_width = area.width.saturating_sub(BORDER_SIZE).max(1) as usize;
 
     let exit_info = if !app.stage_outputs.is_empty() {
         let idx = app
@@ -221,23 +222,33 @@ fn render_output(frame: &mut Frame, app: &mut App, area: Rect) {
         String::new()
     };
 
-    let view = app.view();
+    // Extract immutable view state before we may need &mut app later.
+    let output_mode = app.view().output_mode;
+    let search_query = app.view().search.query.clone();
+    let search_matches: Vec<(usize, usize, usize)> = app
+        .view()
+        .search
+        .matches
+        .iter()
+        .map(|&(line, start, end)| (line, start, end))
+        .collect();
+    let search_match_idx = app.view().search.match_idx;
 
-    let mode_label = match view.output_mode {
+    let mode_label = match output_mode {
         OutputMode::Stdout => "stdout",
         OutputMode::Stderr => "stderr",
         OutputMode::Combined => "combined",
     };
 
     // Include search match count when a search is active.
-    let search_info = if !view.search.query.is_empty() {
-        if view.search.matches.is_empty() {
+    let search_info = if !search_query.is_empty() {
+        if search_matches.is_empty() {
             " [no matches]".to_string()
         } else {
             format!(
                 " [{}/{}]",
-                view.search.match_idx + 1,
-                view.search.matches.len()
+                search_match_idx + 1,
+                search_matches.len()
             )
         }
     } else {
@@ -261,8 +272,9 @@ fn render_output(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let raw_content = app.current_output_text();
-    if raw_content.is_empty() {
+    // Use the efficient byte-level line count (no String allocation).
+    let total_lines = app.output_line_count();
+    if total_lines == 0 {
         let hint = Paragraph::new("(no output)")
             .style(Style::default().fg(Color::DarkGray))
             .alignment(Alignment::Center);
@@ -270,31 +282,27 @@ fn render_output(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    // Use the efficient byte-level line count (no String allocation).
-    let total_lines = app.output_line_count();
     let visible_height = inner.height as usize;
-    let scroll = view.scroll.min(total_lines.saturating_sub(visible_height));
+    let max_scroll = app.compute_max_scroll();
+    // Clamp and persist: when the window resizes, the old scroll position may
+    // exceed the new max.  Writing back keeps app state consistent so the next
+    // key press doesn't use a stale value.
+    let scroll = app.view().scroll.min(max_scroll);
+    app.view_mut().scroll = scroll;
+
+    let raw_content = app.current_output_text();
 
     // Build search highlight map (only entries in the visible window matter,
     // but we provide the full map — the windowed parser skips invisible lines).
-    let line_match_map = if !view.search.matches.is_empty() {
+    let line_match_map = if !search_matches.is_empty() {
         let mut map: std::collections::HashMap<usize, Vec<(usize, usize, bool)>> =
             std::collections::HashMap::new();
-        // matches is sorted by line index — use binary search to find only the
-        // matches whose line falls in [scroll, scroll + visible_height).
-        // This avoids iterating all 90k+ matches when only ~50 are visible.
         let window_end = scroll + visible_height;
-        let lo = view
-            .search
-            .matches
-            .partition_point(|&(line, _, _)| line < scroll);
-        let hi = view
-            .search
-            .matches
-            .partition_point(|&(line, _, _)| line < window_end);
+        let lo = search_matches.partition_point(|&(line, _, _)| line < scroll);
+        let hi = search_matches.partition_point(|&(line, _, _)| line < window_end);
         for idx in lo..hi {
-            let (line, start, end) = view.search.matches[idx];
-            let is_current = idx == view.search.match_idx;
+            let (line, start, end) = search_matches[idx];
+            let is_current = idx == search_match_idx;
             map.entry(line).or_default().push((start, end, is_current));
         }
         map
@@ -319,7 +327,7 @@ fn render_output(frame: &mut Frame, app: &mut App, area: Rect) {
     // `stderr_map` has one entry per `CombinedLine` (== one entry per rendered line);
     // `unwrap_or(false)` handles any transient mismatch (e.g. trailing empty lines).
     let stderr_map = app.combined_stderr_map();
-    if matches!(app.view().output_mode, OutputMode::Combined) {
+    if matches!(output_mode, OutputMode::Combined) {
         for (i, line) in lines.iter_mut().enumerate() {
             // Map from visible index back to the absolute line index.
             let abs_i = scroll + i;
@@ -345,13 +353,9 @@ fn render_output(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(para, inner);
 
     // Render scrollbar hint at bottom-right of inner area
-    if total_lines > visible_height {
-        let pct = if total_lines <= visible_height {
-            100
-        } else {
-            (scroll * 100) / (total_lines - visible_height)
-        };
-        let hint = format!(" {}% ", pct);
+    if max_scroll > 0 {
+        let pct = ((scroll as f64 / max_scroll as f64) * 100.0).round() as usize;
+        let hint = format!(" {}% ", pct.min(100));
         let hint_len = hint.len() as u16;
         if inner.width > hint_len + 2 {
             let hint_area = Rect::new(

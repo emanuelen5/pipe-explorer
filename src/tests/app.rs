@@ -766,6 +766,7 @@ async fn test_scroll_down_clamped_to_visible_height() {
     // Simulate 10 lines of output and a visible height of 3.
     app.stage_outputs = vec![make_stage_output("1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n")];
     app.visible_output_lines = 3;
+    app.visible_output_width = 80;
 
     // display_line_count = 11 (10 newlines + 1 trailing empty line), visible_height = 3,
     // so max useful scroll = 11 - 3 = 8.
@@ -788,6 +789,7 @@ async fn test_scroll_up_after_bottom_has_no_hysteresis() {
 
     app.stage_outputs = vec![make_stage_output("1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n")];
     app.visible_output_lines = 3;
+    app.visible_output_width = 80;
 
     // Scroll all the way to the bottom.
     for _ in 0..20 {
@@ -809,6 +811,7 @@ async fn test_g_key_jumps_to_correct_bottom() {
 
     app.stage_outputs = vec![make_stage_output("1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n")];
     app.visible_output_lines = 3;
+    app.visible_output_width = 80;
 
     // Press G (jump to bottom).
     app.handle_event(make_key(KeyCode::Char('G')));
@@ -821,6 +824,112 @@ async fn test_g_key_jumps_to_correct_bottom() {
     // One up should immediately change scroll.
     app.handle_event(make_key(KeyCode::Char('k')));
     assert_eq!(app.view().scroll, 7, "k after G should reach 6");
+}
+
+/// When lines wrap, max scroll should allow scrolling further so the last line is visible.
+#[tokio::test]
+async fn test_scroll_accounts_for_line_wrapping() {
+    let pipeline = parse_pipeline("echo a");
+    let mut app = App::new(pipeline);
+
+    // 5 lines of output, each 20 chars wide. At width=10 each line wraps to 2 visual rows.
+    // 5 lines × 2 visual rows = 10 visual rows total, plus 1 row for trailing empty line.
+    // With visible_height = 6 (6 visual rows on screen):
+    //   Walking backward:
+    //     line 5 (empty): 1 row (accum = 1)
+    //     line 4: 2 rows (accum = 3)
+    //     line 3: 2 rows (accum = 5)
+    //     line 2: 2 rows → accum would be 7 > 6, and lines_from_end=3 > 0 → STOP
+    //   lines_from_end = 3, max_scroll = 6 - 3 = 3
+    //   Lines 3-5 take 5 visual rows, fitting within 6.
+    let long_line = "abcdefghij".repeat(2); // 20 chars
+    let content = format!("{0}\n{0}\n{0}\n{0}\n{0}\n", long_line);
+    app.stage_outputs = vec![make_stage_output(&content)];
+    app.visible_output_lines = 6;
+    app.visible_output_width = 10;
+
+    let max_scroll = app.compute_max_scroll();
+    assert_eq!(max_scroll, 3, "max_scroll should account for wrapped lines");
+
+    // Scrolling down many times should clamp to 3.
+    for _ in 0..20 {
+        app.scroll_down(1);
+    }
+    assert_eq!(app.view().scroll, 3, "scroll should be clamped to wrap-aware max");
+
+    // G should jump to the correct bottom.
+    app.view_mut().scroll = 0;
+    app.handle_event(make_key(KeyCode::Char('G')));
+    assert_eq!(app.view().scroll, 3, "G should use wrap-aware max_scroll");
+}
+
+/// When all lines fit within visible height (even with wrapping), max scroll should be 0.
+#[tokio::test]
+async fn test_scroll_wrapping_all_fits() {
+    let pipeline = parse_pipeline("echo a");
+    let mut app = App::new(pipeline);
+
+    // 2 lines of 20 chars. At width=10, each wraps to 2 rows → 4 visual rows.
+    // visible_height = 5 → all fits, max_scroll = 0.
+    let content = "abcdefghijklmnopqrst\nabcdefghijklmnopqrst\n";
+    app.stage_outputs = vec![make_stage_output(content)];
+    app.visible_output_lines = 5;
+    app.visible_output_width = 10;
+
+    assert_eq!(app.compute_max_scroll(), 0, "all content fits — max_scroll should be 0");
+}
+
+/// Lines with ANSI escape sequences should have their display width computed
+/// from the visible text only (escapes don't consume columns).
+#[tokio::test]
+async fn test_scroll_wrapping_with_ansi() {
+    let pipeline = parse_pipeline("echo a");
+    let mut app = App::new(pipeline);
+
+    // Each visible line is exactly 5 chars ("hello"), but the raw text contains
+    // ANSI codes that bulk it up.  At width=5 no wrapping should occur.
+    let line = "\x1b[31mhello\x1b[0m";
+    let content = format!("{0}\n{0}\n{0}\n{0}\n{0}\n", line);
+    app.stage_outputs = vec![make_stage_output(&content)];
+    app.visible_output_lines = 3;
+    app.visible_output_width = 5;
+
+    // 6 display lines (5 newlines + trailing empty).  ANSI-stripped width = 5.
+    // At width=5, each line takes 1 visual row → no wrapping.
+    // max_scroll = 6 - 3 = 3 (same as without wrapping).
+    assert_eq!(app.compute_max_scroll(), 3, "ANSI codes should not affect wrapping");
+}
+
+/// Long lines followed by short lines: the short lines must be fully visible
+/// at max scroll (reproduces the real-world bug where the last few lines were
+/// clipped because a long line was incorrectly included in the visible window).
+#[tokio::test]
+async fn test_scroll_long_lines_followed_by_short() {
+    let pipeline = parse_pipeline("echo a");
+    let mut app = App::new(pipeline);
+
+    // 3 long lines (40 chars each → 4 visual rows at width=10) + 3 short lines.
+    let long = "a".repeat(40);
+    let content = format!("{0}\n{0}\n{0}\nshort1\nshort2\nshort3\n", long);
+    app.stage_outputs = vec![make_stage_output(&content)];
+    app.visible_output_lines = 6;
+    app.visible_output_width = 10;
+
+    // 7 logical lines (3 long + 3 short + 1 trailing empty).
+    // Walking backward:
+    //   line 6 (empty): 1 row (accum=1)
+    //   line 5 ("short3"): 1 row (accum=2)
+    //   line 4 ("short2"): 1 row (accum=3)
+    //   line 3 ("short1"): 1 row (accum=4)
+    //   line 2 (40 chars): 4 rows → accum would be 8 > 6, stop.
+    // lines_from_end = 4, max_scroll = 7 - 4 = 3.
+    // Lines 3-6 take 4 visual rows, all fit in 6 rows. All short lines visible.
+    let max_scroll = app.compute_max_scroll();
+    assert_eq!(max_scroll, 3, "short trailing lines must be fully visible");
+
+    // Verify pressing G shows the short lines.
+    app.handle_event(make_key(KeyCode::Char('G')));
+    assert_eq!(app.view().scroll, 3);
 }
 
 // ---------------------------------------------------------------
