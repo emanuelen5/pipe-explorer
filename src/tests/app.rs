@@ -767,8 +767,9 @@ async fn test_scroll_down_clamped_to_visible_height() {
     app.stage_outputs = vec![make_stage_output("1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n")];
     app.visible_output_lines = 3;
 
-    // Max useful scroll = total_lines - visible_height = 10 - 3 = 7.
-    // Scrolling down many more times should not push scroll beyond 7.
+    // display_line_count = 11 (10 newlines + 1 trailing empty line), visible_height = 3,
+    // so max useful scroll = 11 - 3 = 8.
+    // Scrolling down many more times should not push scroll beyond 8.
     for _ in 0..20 {
         app.scroll_down(1);
     }

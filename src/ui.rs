@@ -319,7 +319,7 @@ fn render_output(frame: &mut Frame, app: &mut App, area: Rect) {
     // `stderr_map` has one entry per `CombinedLine` (== one entry per rendered line);
     // `unwrap_or(false)` handles any transient mismatch (e.g. trailing empty lines).
     let stderr_map = app.combined_stderr_map();
-    if !matches!(app.view().output_mode, OutputMode::Combined) {
+    if matches!(app.view().output_mode, OutputMode::Combined) {
         for (i, line) in lines.iter_mut().enumerate() {
             // Map from visible index back to the absolute line index.
             let abs_i = scroll + i;

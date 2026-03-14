@@ -923,11 +923,6 @@ impl App {
             KeyCode::Char('G') | KeyCode::End => {
                 let total = self.output_line_count();
                 self.view_mut().scroll = total.saturating_sub(self.visible_output_lines);
-                print!(
-                    "total lines: {}, scroll set to: {}",
-                    total,
-                    self.view().scroll
-                );
             }
 
             // Search
