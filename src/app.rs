@@ -1110,13 +1110,37 @@ impl App {
             KeyCode::Tab => {
                 // Tab-complete the current content against known commands.
                 if let AppMode::Command(ref mut editor) = self.mode {
-                    let completed = Self::KNOWN_COMMANDS
+                    let matches: Vec<&str> = Self::KNOWN_COMMANDS
                         .iter()
-                        .find(|&&cmd| cmd.starts_with(editor.content.as_str()))
-                        .copied();
-                    if let Some(cmd) = completed {
-                        editor.content = cmd.to_string();
-                        editor.cursor = cmd.len();
+                        .filter(|&&cmd| cmd.starts_with(editor.content.as_str()))
+                        .copied()
+                        .collect();
+                    const BELL: &str = "\x07";
+                    match matches.len() {
+                        0 => {
+                            print!("{}", BELL);
+                        }
+                        1 => {
+                            // Unique match — complete in full
+                            editor.content = matches[0].to_string();
+                            editor.cursor = matches[0].len();
+                        }
+                        _ => {
+                            let mut common_prefix = matches[0].to_string();
+                            for m in &matches[1..] {
+                                common_prefix.truncate(
+                                    common_prefix
+                                        .chars()
+                                        .zip(m.chars())
+                                        .take_while(|(a, b)| a == b)
+                                        .map(|(a, _)| a.len_utf8())
+                                        .sum(),
+                                );
+                            }
+                            editor.content = common_prefix.clone();
+                            editor.cursor = common_prefix.len();
+                            print!("{}", BELL);
+                        }
                     }
                 }
             }
