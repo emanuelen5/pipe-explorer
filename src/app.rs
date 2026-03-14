@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,6 +9,8 @@ use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
 use futures::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
+use ratatui::text::Text;
+use ratatui::widgets::{Paragraph, Wrap};
 use tokio::sync::mpsc;
 
 use crate::ansi::AnsiLineIndex;
@@ -186,6 +189,8 @@ pub struct App {
     exec_rx: mpsc::Receiver<StreamMsg>,
     /// Number of visible lines in the output pane (updated each frame by the renderer).
     pub visible_output_lines: usize,
+    /// Width (columns) of the output pane inner area (updated each frame by the renderer).
+    pub visible_output_width: usize,
     /// Search history shared across all pipeline stages.
     pub search_history: SearchHistory,
 }
@@ -242,6 +247,14 @@ fn compute_editor_scroll(
     }
 }
 
+/// How many visual (wrapped) rows a single `Line` occupies in a Paragraph
+/// with `Wrap { trim: false }` at the given terminal width.
+fn visual_rows_for_line(line: &ratatui::text::Line<'_>, width: u16) -> usize {
+    // Paragraph::line_count uses the same WordWrapper as rendering.
+    let para = Paragraph::new(Text::from(vec![line.clone()])).wrap(Wrap { trim: false });
+    para.line_count(width)
+}
+
 impl App {
     pub fn new(pipeline: Pipeline) -> Self {
         let (exec_tx, mut request_rx) = mpsc::channel::<ExecRequest>(8);
@@ -287,6 +300,7 @@ impl App {
             exec_tx,
             exec_rx,
             visible_output_lines: 1, // Minimum value
+            visible_output_width: 1,  // Minimum value
             search_history: SearchHistory::default(),
         }
     }
@@ -538,8 +552,7 @@ impl App {
 
     /// Scroll down by `n` lines.
     pub fn scroll_down(&mut self, n: usize) {
-        let total = self.output_line_count();
-        let max_scroll = total.saturating_sub(self.visible_output_lines);
+        let max_scroll = self.compute_max_scroll();
         let scroll = &mut self.view_mut().scroll;
         *scroll = (*scroll + n).min(max_scroll);
     }
@@ -548,6 +561,67 @@ impl App {
     pub fn scroll_up(&mut self, n: usize) {
         let scroll = &mut self.view_mut().scroll;
         *scroll = scroll.saturating_sub(n);
+    }
+
+    /// Compute the maximum scroll position (in logical lines) that ensures
+    /// the very last line of output is visible on screen, accounting for
+    /// line-wrapping.
+    ///
+    /// Walks backward from the last line, accumulating visual (wrapped) row
+    /// counts (via `Paragraph::line_count`, which uses the same `WordWrapper`
+    /// as rendering), and stops once enough lines have been found to fill
+    /// the visible output area.
+    pub fn compute_max_scroll(&self) -> usize {
+        let total = self.output_line_count();
+        let width = self.visible_output_width;
+        let visible = self.visible_output_lines;
+
+        if total == 0 || width == 0 || visible == 0 {
+            return 0;
+        }
+
+        // In combined mode each line is prefixed with a 1-column margin,
+        // reducing the effective width available for content.
+        let effective_width = if matches!(self.view().output_mode, OutputMode::Combined) {
+            (width as u16).saturating_sub(1).max(1)
+        } else {
+            width as u16
+        };
+
+        let raw = self.current_output_text();
+        let line_index = self.current_line_index();
+        let no_highlights = HashMap::new();
+
+        let mut visual_rows: usize = 0;
+        let mut lines_from_end: usize = 0;
+
+        for line_idx in (0..total).rev() {
+            // Parse just this one logical line into a styled ratatui Line.
+            let styled = crate::ansi::ansi_text_to_visible_lines(
+                &raw,
+                line_idx,
+                1,
+                &no_highlights,
+                line_index,
+            );
+            let rows = if let Some(line) = styled.first() {
+                visual_rows_for_line(line, effective_width)
+            } else {
+                1 // empty / missing line still occupies one row
+            };
+            // If adding this line would overflow the visible area and we
+            // already have at least one line, stop — this line doesn't fit.
+            if visual_rows + rows > visible && lines_from_end > 0 {
+                break;
+            }
+            visual_rows += rows;
+            lines_from_end += 1;
+            if visual_rows >= visible {
+                break;
+            }
+        }
+
+        total.saturating_sub(lines_from_end)
     }
 
     /// Save current output text to a file.
@@ -921,13 +995,7 @@ impl App {
                 self.view_mut().scroll = 0;
             }
             KeyCode::Char('G') | KeyCode::End => {
-                let total = self.output_line_count();
-                self.view_mut().scroll = total.saturating_sub(self.visible_output_lines);
-                print!(
-                    "total lines: {}, scroll set to: {}",
-                    total,
-                    self.view().scroll
-                );
+                self.view_mut().scroll = self.compute_max_scroll();
             }
 
             // Search
