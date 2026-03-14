@@ -1089,16 +1089,16 @@ impl App {
 
     /// Handle a key event while in command mode (`:` prompt).
     fn handle_command_key(&mut self, key: KeyEvent) -> bool {
+        let Some(editor) = self.editor_mut() else {
+            return false;
+        };
+
         match key.code {
             KeyCode::Esc => {
                 self.mode = AppMode::Normal;
             }
             KeyCode::Enter => {
-                let cmd = if let AppMode::Command(ref editor) = self.mode {
-                    editor.content.trim().to_string()
-                } else {
-                    String::new()
-                };
+                let cmd = editor.content.trim().to_string();
                 self.mode = AppMode::Normal;
                 // Dispatch the command
                 if cmd == "h" || cmd == "help" {
@@ -1109,45 +1109,41 @@ impl App {
             }
             KeyCode::Tab => {
                 // Tab-complete the current content against known commands.
-                if let AppMode::Command(ref mut editor) = self.mode {
-                    let matches: Vec<&str> = Self::KNOWN_COMMANDS
-                        .iter()
-                        .filter(|&&cmd| cmd.starts_with(editor.content.as_str()))
-                        .copied()
-                        .collect();
-                    const BELL: &str = "\x07";
-                    match matches.len() {
-                        0 => {
-                            print!("{}", BELL);
+                let matches: Vec<&str> = Self::KNOWN_COMMANDS
+                    .iter()
+                    .filter(|&&cmd| cmd.starts_with(editor.content.as_str()))
+                    .copied()
+                    .collect();
+                const BELL: &str = "\x07";
+                match matches.len() {
+                    0 => {
+                        print!("{}", BELL);
+                    }
+                    1 => {
+                        // Unique match — complete in full
+                        editor.content = matches[0].to_string();
+                        editor.cursor = matches[0].len();
+                    }
+                    _ => {
+                        let mut common_prefix = matches[0].to_string();
+                        for m in &matches[1..] {
+                            common_prefix.truncate(
+                                common_prefix
+                                    .chars()
+                                    .zip(m.chars())
+                                    .take_while(|(a, b)| a == b)
+                                    .map(|(a, _)| a.len_utf8())
+                                    .sum(),
+                            );
                         }
-                        1 => {
-                            // Unique match — complete in full
-                            editor.content = matches[0].to_string();
-                            editor.cursor = matches[0].len();
-                        }
-                        _ => {
-                            let mut common_prefix = matches[0].to_string();
-                            for m in &matches[1..] {
-                                common_prefix.truncate(
-                                    common_prefix
-                                        .chars()
-                                        .zip(m.chars())
-                                        .take_while(|(a, b)| a == b)
-                                        .map(|(a, _)| a.len_utf8())
-                                        .sum(),
-                                );
-                            }
-                            editor.content = common_prefix.clone();
-                            editor.cursor = common_prefix.len();
-                            print!("{}", BELL);
-                        }
+                        editor.content = common_prefix.clone();
+                        editor.cursor = common_prefix.len();
+                        print!("{}", BELL);
                     }
                 }
             }
             _ => {
-                if let Some(editor) = self.editor_mut() {
-                    editor.handle_key(key);
-                }
+                editor.handle_key(key);
             }
         }
         false
