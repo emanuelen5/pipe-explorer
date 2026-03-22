@@ -138,10 +138,8 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
         // A stage is actively receiving output when its last StageUpdate
         // arrived within DATA_ACTIVE_TIMEOUT. This is slightly longer than
         // the executor's throttle interval so the highlight doesn't blink.
-        let data_is_active = app
-            .stage_last_update
-            .get(i)
-            .and_then(|t| *t)
+        let data_is_active = stage
+            .last_update
             .is_some_and(|t| t.elapsed() < DATA_ACTIVE_TIMEOUT);
 
         // Compute the line count label for this stage.
