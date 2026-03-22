@@ -195,6 +195,8 @@ pub struct App {
     pub search_history: SearchHistory,
     /// Undo history stack: each entry is a previous pipeline state.
     pipeline_history: Vec<Pipeline>,
+    /// Redo history stack: populated by undo(), cleared on any new pipeline change.
+    redo_stack: Vec<Pipeline>,
 }
 
 /// Return the byte offset within `before_cursor` where the previous word begins.
@@ -305,6 +307,7 @@ impl App {
             visible_output_width: 1,  // Minimum value
             search_history: SearchHistory::default(),
             pipeline_history: Vec::new(),
+            redo_stack: Vec::new(),
         }
     }
 
@@ -389,19 +392,44 @@ impl App {
         self.running = false;
     }
 
-    /// Push the current pipeline onto the undo history stack.
-    fn save_pipeline_state(&mut self) {
-        const MAX_HISTORY: usize = 100;
-        if self.pipeline_history.len() >= MAX_HISTORY {
-            self.pipeline_history.remove(0);
+    /// Maximum number of undo/redo history entries.
+    const MAX_HISTORY: usize = 100;
+
+    /// Append `pipeline` to `stack`, evicting the oldest entry if the cap is reached.
+    fn push_capped(stack: &mut Vec<Pipeline>, pipeline: Pipeline) {
+        if stack.len() >= Self::MAX_HISTORY {
+            stack.remove(0);
         }
-        self.pipeline_history.push(self.pipeline.clone());
+        stack.push(pipeline);
+    }
+
+    /// Push the current pipeline onto the undo history stack.
+    /// Clears the redo stack, since a new change branches the history.
+    fn save_pipeline_state(&mut self) {
+        Self::push_capped(&mut self.pipeline_history, self.pipeline.clone());
+        self.redo_stack.clear();
     }
 
     /// Undo the last pipeline change, restoring the previous pipeline state.
     pub fn undo(&mut self) {
         if let Some(prev) = self.pipeline_history.pop() {
-            self.pipeline = prev;
+            let current = std::mem::replace(&mut self.pipeline, prev);
+            Self::push_capped(&mut self.redo_stack, current);
+            self.sync_stage_views();
+            if !self.pipeline.is_empty() {
+                self.trigger_exec(false);
+            } else {
+                self.cancel_in_flight_execution();
+                self.stage_outputs.clear();
+            }
+        }
+    }
+
+    /// Redo the last undone pipeline change.
+    pub fn redo(&mut self) {
+        if let Some(next) = self.redo_stack.pop() {
+            let current = std::mem::replace(&mut self.pipeline, next);
+            Self::push_capped(&mut self.pipeline_history, current);
             self.sync_stage_views();
             if !self.pipeline.is_empty() {
                 self.trigger_exec(false);
@@ -1070,6 +1098,11 @@ impl App {
             // Undo
             KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.undo();
+            }
+
+            // Redo (Ctrl+Shift+Z)
+            KeyCode::Char('Z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.redo();
             }
 
             _ => {}

@@ -1215,3 +1215,136 @@ async fn test_undo_delete_only_stage_restores_pipeline() {
     assert_eq!(app.pipeline.len(), 1, "undo should restore the only stage");
     assert_eq!(app.pipeline.stages[0].command, "echo hello");
 }
+
+fn make_ctrl_shift_z() -> Event {
+    Event::Key(KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::CONTROL))
+}
+
+// ---------------------------------------------------------------
+// Redo (Ctrl+Shift+Z) tests
+// ---------------------------------------------------------------
+
+/// Ctrl+Shift+Z with no redo history is a no-op.
+#[tokio::test]
+async fn test_redo_with_no_history_is_noop() {
+    let pipeline = parse_pipeline("echo a | echo b");
+    let mut app = App::new(pipeline);
+
+    app.handle_event(make_ctrl_shift_z());
+
+    assert_eq!(app.pipeline.len(), 2);
+    assert_eq!(app.pipeline.stages[0].command, "echo a");
+}
+
+/// Undo followed by redo restores the modified state.
+#[tokio::test]
+async fn test_redo_after_undo_restores_modified_state() {
+    let pipeline = parse_pipeline("echo a");
+    let mut app = App::new(pipeline);
+
+    // Edit: "echo a" → "echo b"
+    app.mode = AppMode::Editing {
+        editor: EditorState::new("echo b".to_string()),
+        pending_new_stage: false,
+    };
+    app.confirm_edit();
+    assert_eq!(app.pipeline.stages[0].command, "echo b");
+
+    // Undo → "echo a"
+    app.handle_event(make_ctrl_z());
+    assert_eq!(app.pipeline.stages[0].command, "echo a");
+
+    // Redo → "echo b"
+    app.handle_event(make_ctrl_shift_z());
+    assert_eq!(app.pipeline.stages[0].command, "echo b");
+}
+
+/// Making a new change after undo clears the redo stack.
+#[tokio::test]
+async fn test_new_change_after_undo_clears_redo_stack() {
+    let pipeline = parse_pipeline("echo a");
+    let mut app = App::new(pipeline);
+
+    // Edit 1: → "echo b"
+    app.mode = AppMode::Editing {
+        editor: EditorState::new("echo b".to_string()),
+        pending_new_stage: false,
+    };
+    app.confirm_edit();
+
+    // Undo → "echo a"
+    app.handle_event(make_ctrl_z());
+    assert_eq!(app.pipeline.stages[0].command, "echo a");
+
+    // New edit (different from redo): "echo a" → "echo c"
+    app.mode = AppMode::Editing {
+        editor: EditorState::new("echo c".to_string()),
+        pending_new_stage: false,
+    };
+    app.confirm_edit();
+    assert_eq!(app.pipeline.stages[0].command, "echo c");
+
+    // Redo should be a no-op (redo stack was cleared by the new edit).
+    app.handle_event(make_ctrl_shift_z());
+    assert_eq!(
+        app.pipeline.stages[0].command, "echo c",
+        "redo should be no-op after a new change"
+    );
+}
+
+/// Multiple undo/redo cycles traverse history correctly.
+#[tokio::test]
+async fn test_undo_redo_multiple_cycles() {
+    let pipeline = parse_pipeline("echo a");
+    let mut app = App::new(pipeline);
+
+    // Three sequential edits.
+    for cmd in &["echo b", "echo c", "echo d"] {
+        app.mode = AppMode::Editing {
+            editor: EditorState::new(cmd.to_string()),
+            pending_new_stage: false,
+        };
+        app.confirm_edit();
+    }
+    assert_eq!(app.pipeline.stages[0].command, "echo d");
+
+    // Undo twice → "echo b"
+    app.handle_event(make_ctrl_z());
+    assert_eq!(app.pipeline.stages[0].command, "echo c");
+    app.handle_event(make_ctrl_z());
+    assert_eq!(app.pipeline.stages[0].command, "echo b");
+
+    // Redo once → "echo c"
+    app.handle_event(make_ctrl_shift_z());
+    assert_eq!(app.pipeline.stages[0].command, "echo c");
+
+    // Redo again → "echo d"
+    app.handle_event(make_ctrl_shift_z());
+    assert_eq!(app.pipeline.stages[0].command, "echo d");
+
+    // Redo with nothing left → stays at "echo d"
+    app.handle_event(make_ctrl_shift_z());
+    assert_eq!(app.pipeline.stages[0].command, "echo d");
+}
+
+/// Undo of a delete followed by redo re-deletes the stage.
+#[tokio::test]
+async fn test_undo_redo_delete() {
+    let pipeline = parse_pipeline("echo a | echo b");
+    let mut app = App::new(pipeline);
+    app.pipeline.selected = 1;
+
+    // Delete last stage.
+    app.handle_event(make_key(KeyCode::Char('d')));
+    assert_eq!(app.pipeline.len(), 1);
+
+    // Undo: restores both stages.
+    app.handle_event(make_ctrl_z());
+    assert_eq!(app.pipeline.len(), 2);
+    assert_eq!(app.pipeline.stages[1].command, "echo b");
+
+    // Redo: re-deletes.
+    app.handle_event(make_ctrl_shift_z());
+    assert_eq!(app.pipeline.len(), 1);
+    assert_eq!(app.pipeline.stages[0].command, "echo a");
+}

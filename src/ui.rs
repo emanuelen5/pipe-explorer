@@ -664,6 +664,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         ListItem::new("o              Add new stage"),
         ListItem::new("d / Delete     Delete current stage"),
         ListItem::new("Ctrl+z         Undo last pipeline change"),
+        ListItem::new("Ctrl+Shift+z   Redo last undone change"),
         ListItem::new("r              Re-run (bypass cache)"),
         ListItem::new("s              Save output to file"),
         ListItem::new("m/1/2/3        Switch between stdout/stderr/combined views"),
