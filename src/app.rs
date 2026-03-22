@@ -1031,7 +1031,7 @@ impl App {
             }
 
             // Rerun
-            KeyCode::Char('r') => {
+            KeyCode::Char('r') if key.modifiers.is_empty() => {
                 self.trigger_exec(true);
             }
 
@@ -1108,13 +1108,13 @@ impl App {
                 self.mode = AppMode::Command(EditorState::empty());
             }
 
-            // Undo
-            KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            // Undo (u)
+            KeyCode::Char('u') => {
                 self.undo();
             }
 
-            // Redo (Ctrl+Shift+Z)
-            KeyCode::Char('Z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            // Redo (Ctrl+R)
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.redo();
             }
 

@@ -1102,24 +1102,24 @@ async fn test_confirm_delete_then_immediate_delete_clears_outputs() {
 }
 
 // ---------------------------------------------------------------
-// Undo (Ctrl+Z) tests
+// Undo (u) tests
 // ---------------------------------------------------------------
 
-/// Ctrl+Z with no history does nothing.
+/// `u` with no history does nothing.
 #[tokio::test]
 async fn test_undo_with_no_history_is_noop() {
     let pipeline = parse_pipeline("echo a | echo b");
     let mut app = App::new(pipeline);
     app.pipeline.selected = 1;
 
-    app.handle_event(make_event("Ctrl+Z"));
+    app.handle_event(make_event("u"));
 
     // Pipeline should be unchanged.
     assert_eq!(app.pipeline.len(), 2);
     assert_eq!(app.pipeline.selected, 1);
 }
 
-/// Ctrl+Z after editing a stage command restores the original command.
+/// `u` after editing a stage command restores the original command.
 #[tokio::test]
 async fn test_undo_edit_restores_original_command() {
     let pipeline = parse_pipeline("echo a | echo b");
@@ -1136,7 +1136,7 @@ async fn test_undo_edit_restores_original_command() {
     assert_eq!(app.pipeline.stages[1].command, "echo CHANGED");
 
     // Undo should restore "echo b".
-    app.handle_event(make_event("Ctrl+Z"));
+    app.handle_event(make_event("u"));
 
     assert_eq!(
         app.pipeline.stages[1].command, "echo b",
@@ -1145,7 +1145,7 @@ async fn test_undo_edit_restores_original_command() {
     assert_eq!(app.pipeline.len(), 2);
 }
 
-/// Ctrl+Z after confirming an edit with no change does not add a history entry.
+/// `u` after confirming an edit with no change does not add a history entry.
 #[tokio::test]
 async fn test_undo_noop_edit_does_not_save_history() {
     let pipeline = parse_pipeline("echo a");
@@ -1159,13 +1159,13 @@ async fn test_undo_noop_edit_does_not_save_history() {
     app.confirm_edit();
 
     // Undo should have no history to restore.
-    app.handle_event(make_event("Ctrl+Z"));
+    app.handle_event(make_event("u"));
 
     assert_eq!(app.pipeline.stages[0].command, "echo a");
     assert_eq!(app.pipeline.len(), 1);
 }
 
-/// Ctrl+Z after an immediate delete (last/only stage) restores the pipeline.
+/// `u` after an immediate delete (last/only stage) restores the pipeline.
 #[tokio::test]
 async fn test_undo_immediate_delete_restores_stage() {
     let pipeline = parse_pipeline("echo a | echo b");
@@ -1173,17 +1173,25 @@ async fn test_undo_immediate_delete_restores_stage() {
     app.pipeline.selected = 1; // select last stage
 
     app.handle_event(make_key(KeyCode::Char('d')));
-    assert_eq!(app.pipeline.len(), 1, "last stage should be deleted immediately");
+    assert_eq!(
+        app.pipeline.len(),
+        1,
+        "last stage should be deleted immediately"
+    );
 
     // Undo should restore the deleted stage.
-    app.handle_event(make_event("Ctrl+Z"));
+    app.handle_event(make_event("u"));
 
-    assert_eq!(app.pipeline.len(), 2, "undo should restore the deleted stage");
+    assert_eq!(
+        app.pipeline.len(),
+        2,
+        "undo should restore the deleted stage"
+    );
     assert_eq!(app.pipeline.stages[1].command, "echo b");
     assert_eq!(app.pipeline.selected, 1);
 }
 
-/// Ctrl+Z after a confirmed delete restores the pipeline.
+/// `u` after a confirmed delete restores the pipeline.
 #[tokio::test]
 async fn test_undo_confirmed_delete_restores_stage() {
     let pipeline = parse_pipeline("echo a | echo b | echo c");
@@ -1194,17 +1202,25 @@ async fn test_undo_confirmed_delete_restores_stage() {
     assert!(matches!(app.mode, AppMode::ConfirmingDelete));
 
     app.handle_event(make_key(KeyCode::Char('y')));
-    assert_eq!(app.pipeline.len(), 2, "first stage should be deleted after confirmation");
+    assert_eq!(
+        app.pipeline.len(),
+        2,
+        "first stage should be deleted after confirmation"
+    );
 
     // Undo should restore the deleted stage.
-    app.handle_event(make_event("Ctrl+Z"));
+    app.handle_event(make_event("u"));
 
-    assert_eq!(app.pipeline.len(), 3, "undo should restore the deleted stage");
+    assert_eq!(
+        app.pipeline.len(),
+        3,
+        "undo should restore the deleted stage"
+    );
     assert_eq!(app.pipeline.stages[0].command, "echo a");
     assert_eq!(app.pipeline.stages[1].command, "echo b");
 }
 
-/// Ctrl+Z after inserting a new stage removes it.
+/// `u` after inserting a new stage removes it.
 #[tokio::test]
 async fn test_undo_insert_removes_new_stage() {
     let pipeline = parse_pipeline("echo a");
@@ -1226,13 +1242,17 @@ async fn test_undo_insert_removes_new_stage() {
     assert_eq!(app.pipeline.stages[1].command, "grep foo");
 
     // Undo should remove the inserted stage entirely.
-    app.handle_event(make_event("Ctrl+Z"));
+    app.handle_event(make_event("u"));
 
-    assert_eq!(app.pipeline.len(), 1, "undo should remove the inserted stage");
+    assert_eq!(
+        app.pipeline.len(),
+        1,
+        "undo should remove the inserted stage"
+    );
     assert_eq!(app.pipeline.stages[0].command, "echo a");
 }
 
-/// Ctrl+Z after inserting and cancelling the edit also undoes the insert.
+/// `u` after inserting and cancelling the edit also undoes the insert.
 #[tokio::test]
 async fn test_undo_insert_cancelled_restores_pipeline() {
     let pipeline = parse_pipeline("echo a");
@@ -1243,10 +1263,14 @@ async fn test_undo_insert_cancelled_restores_pipeline() {
     app.handle_event(make_key(KeyCode::Char('o')));
     assert_eq!(app.pipeline.len(), 2);
     app.cancel_edit(); // removes the pending empty stage
-    assert_eq!(app.pipeline.len(), 1, "cancel should remove the pending stage");
+    assert_eq!(
+        app.pipeline.len(),
+        1,
+        "cancel should remove the pending stage"
+    );
 
     // Undo should still restore (to the same single-stage pipeline).
-    app.handle_event(make_event("Ctrl+Z"));
+    app.handle_event(make_event("u"));
     assert_eq!(app.pipeline.len(), 1);
     assert_eq!(app.pipeline.stages[0].command, "echo a");
 }
@@ -1275,15 +1299,15 @@ async fn test_undo_multiple_times() {
     assert_eq!(app.pipeline.stages[0].command, "echo c");
 
     // First undo → "echo b"
-    app.handle_event(make_event("Ctrl+Z"));
+    app.handle_event(make_event("u"));
     assert_eq!(app.pipeline.stages[0].command, "echo b");
 
     // Second undo → "echo a"
-    app.handle_event(make_event("Ctrl+Z"));
+    app.handle_event(make_event("u"));
     assert_eq!(app.pipeline.stages[0].command, "echo a");
 
     // Third undo → nothing left in history, stays at "echo a"
-    app.handle_event(make_event("Ctrl+Z"));
+    app.handle_event(make_event("u"));
     assert_eq!(app.pipeline.stages[0].command, "echo a");
 }
 
@@ -1294,25 +1318,28 @@ async fn test_undo_delete_only_stage_restores_pipeline() {
     let mut app = App::new(pipeline);
 
     app.handle_event(make_key(KeyCode::Char('d')));
-    assert!(app.pipeline.is_empty(), "only stage should be deleted immediately");
+    assert!(
+        app.pipeline.is_empty(),
+        "only stage should be deleted immediately"
+    );
 
-    app.handle_event(make_event("Ctrl+Z"));
+    app.handle_event(make_event("u"));
 
     assert_eq!(app.pipeline.len(), 1, "undo should restore the only stage");
     assert_eq!(app.pipeline.stages[0].command, "echo hello");
 }
 
 // ---------------------------------------------------------------
-// Redo (Ctrl+Shift+Z) tests
+// Redo (Ctrl+R) tests
 // ---------------------------------------------------------------
 
-/// Ctrl+Shift+Z with no redo history is a no-op.
+/// `Ctrl+R` with no redo history is a no-op.
 #[tokio::test]
 async fn test_redo_with_no_history_is_noop() {
     let pipeline = parse_pipeline("echo a | echo b");
     let mut app = App::new(pipeline);
 
-    app.handle_event(make_event("Ctrl+Shift+Z"));
+    app.handle_event(make_event("Ctrl+R"));
 
     assert_eq!(app.pipeline.len(), 2);
     assert_eq!(app.pipeline.stages[0].command, "echo a");
@@ -1333,11 +1360,11 @@ async fn test_redo_after_undo_restores_modified_state() {
     assert_eq!(app.pipeline.stages[0].command, "echo b");
 
     // Undo → "echo a"
-    app.handle_event(make_event("Ctrl+Z"));
+    app.handle_event(make_event("u"));
     assert_eq!(app.pipeline.stages[0].command, "echo a");
 
     // Redo → "echo b"
-    app.handle_event(make_event("Ctrl+Shift+Z"));
+    app.handle_event(make_event("Ctrl+R"));
     assert_eq!(app.pipeline.stages[0].command, "echo b");
 }
 
@@ -1355,7 +1382,7 @@ async fn test_new_change_after_undo_clears_redo_stack() {
     app.confirm_edit();
 
     // Undo → "echo a"
-    app.handle_event(make_event("Ctrl+Z"));
+    app.handle_event(make_event("u"));
     assert_eq!(app.pipeline.stages[0].command, "echo a");
 
     // New edit (different from redo): "echo a" → "echo c"
@@ -1367,7 +1394,7 @@ async fn test_new_change_after_undo_clears_redo_stack() {
     assert_eq!(app.pipeline.stages[0].command, "echo c");
 
     // Redo should be a no-op (redo stack was cleared by the new edit).
-    app.handle_event(make_event("Ctrl+Shift+Z"));
+    app.handle_event(make_event("Ctrl+R"));
     assert_eq!(
         app.pipeline.stages[0].command, "echo c",
         "redo should be no-op after a new change"
@@ -1391,21 +1418,21 @@ async fn test_undo_redo_multiple_cycles() {
     assert_eq!(app.pipeline.stages[0].command, "echo d");
 
     // Undo twice → "echo b"
-    app.handle_event(make_event("Ctrl+Z"));
+    app.handle_event(make_event("u"));
     assert_eq!(app.pipeline.stages[0].command, "echo c");
-    app.handle_event(make_event("Ctrl+Z"));
+    app.handle_event(make_event("u"));
     assert_eq!(app.pipeline.stages[0].command, "echo b");
 
     // Redo once → "echo c"
-    app.handle_event(make_event("Ctrl+Shift+Z"));
+    app.handle_event(make_event("Ctrl+R"));
     assert_eq!(app.pipeline.stages[0].command, "echo c");
 
     // Redo again → "echo d"
-    app.handle_event(make_event("Ctrl+Shift+Z"));
+    app.handle_event(make_event("Ctrl+R"));
     assert_eq!(app.pipeline.stages[0].command, "echo d");
 
     // Redo with nothing left → stays at "echo d"
-    app.handle_event(make_event("Ctrl+Shift+Z"));
+    app.handle_event(make_event("Ctrl+R"));
     assert_eq!(app.pipeline.stages[0].command, "echo d");
 }
 
@@ -1421,12 +1448,12 @@ async fn test_undo_redo_delete() {
     assert_eq!(app.pipeline.len(), 1);
 
     // Undo: restores both stages.
-    app.handle_event(make_event("Ctrl+Z"));
+    app.handle_event(make_event("u"));
     assert_eq!(app.pipeline.len(), 2);
     assert_eq!(app.pipeline.stages[1].command, "echo b");
 
     // Redo: re-deletes.
-    app.handle_event(make_event("Ctrl+Shift+Z"));
+    app.handle_event(make_event("Ctrl+R"));
     assert_eq!(app.pipeline.len(), 1);
     assert_eq!(app.pipeline.stages[0].command, "echo a");
 }
