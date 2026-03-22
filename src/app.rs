@@ -193,6 +193,8 @@ pub struct App {
     pub visible_output_width: usize,
     /// Search history shared across all pipeline stages.
     pub search_history: SearchHistory,
+    /// Undo history stack: each entry is a previous pipeline state.
+    pipeline_history: Vec<Pipeline>,
 }
 
 /// Return the byte offset within `before_cursor` where the previous word begins.
@@ -302,6 +304,7 @@ impl App {
             visible_output_lines: 1, // Minimum value
             visible_output_width: 1,  // Minimum value
             search_history: SearchHistory::default(),
+            pipeline_history: Vec::new(),
         }
     }
 
@@ -384,6 +387,29 @@ impl App {
         let (_dummy_tx, new_rx) = mpsc::channel::<StreamMsg>(1);
         self.exec_rx = new_rx;
         self.running = false;
+    }
+
+    /// Push the current pipeline onto the undo history stack.
+    fn save_pipeline_state(&mut self) {
+        const MAX_HISTORY: usize = 100;
+        if self.pipeline_history.len() >= MAX_HISTORY {
+            self.pipeline_history.remove(0);
+        }
+        self.pipeline_history.push(self.pipeline.clone());
+    }
+
+    /// Undo the last pipeline change, restoring the previous pipeline state.
+    pub fn undo(&mut self) {
+        if let Some(prev) = self.pipeline_history.pop() {
+            self.pipeline = prev;
+            self.sync_stage_views();
+            if !self.pipeline.is_empty() {
+                self.trigger_exec(false);
+            } else {
+                self.cancel_in_flight_execution();
+                self.stage_outputs.clear();
+            }
+        }
     }
 
     /// Change the output mode of a given stage.
@@ -791,15 +817,36 @@ impl App {
 
     /// Confirm an edit and update the pipeline stage.
     pub fn confirm_edit(&mut self) {
-        let mut is_modified = false;
+        let is_pending_new = matches!(
+            self.mode,
+            AppMode::Editing {
+                pending_new_stage: true,
+                ..
+            }
+        );
+
+        // Determine whether the command will actually change.
+        let will_modify = if let AppMode::Editing { editor, .. } = &self.mode {
+            self.pipeline
+                .selected_stage()
+                .map_or(false, |s| s.command != editor.content)
+        } else {
+            false
+        };
+
+        // For a regular edit (not a newly-inserted stage), save the current
+        // pipeline to history so Ctrl+Z can undo it.
+        if will_modify && !is_pending_new {
+            self.save_pipeline_state();
+        }
+
         if let AppMode::Editing { editor, .. } = std::mem::replace(&mut self.mode, AppMode::Normal)
         {
             if let Some(stage) = self.pipeline.selected_stage_mut() {
-                is_modified = stage.command != editor.content;
                 stage.command = editor.content;
             }
         }
-        if is_modified {
+        if will_modify {
             self.trigger_exec(false);
         }
     }
@@ -896,6 +943,7 @@ impl App {
 
             // Add new stage
             KeyCode::Char('o') | KeyCode::Char('|') => {
+                self.save_pipeline_state();
                 self.pipeline.insert_after_selected();
                 self.sync_stage_views();
                 self.start_editing();
@@ -924,6 +972,7 @@ impl App {
                     let is_last = self.pipeline.selected == self.pipeline.len() - 1;
                     if is_last || self.pipeline.len() == 1 {
                         // Last stage or only stage: delete immediately
+                        self.save_pipeline_state();
                         let removed_idx = self.pipeline.selected;
                         self.pipeline.remove_selected();
                         self.remove_stage_view(removed_idx);
@@ -1018,6 +1067,11 @@ impl App {
                 self.mode = AppMode::Command(EditorState::empty());
             }
 
+            // Undo
+            KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.undo();
+            }
+
             _ => {}
         }
         false
@@ -1048,6 +1102,7 @@ impl App {
     fn handle_confirm_delete_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
+                self.save_pipeline_state();
                 let removed_idx = self.pipeline.selected;
                 self.pipeline.remove_selected();
                 self.remove_stage_view(removed_idx);

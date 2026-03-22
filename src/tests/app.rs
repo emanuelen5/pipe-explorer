@@ -1010,3 +1010,208 @@ async fn test_confirm_delete_then_immediate_delete_clears_outputs() {
     assert!(app.stage_outputs.is_empty(), "stage_outputs should be cleared");
     assert!(!app.running, "running should be false after deleting all stages");
 }
+
+fn make_ctrl_z() -> Event {
+    Event::Key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL))
+}
+
+// ---------------------------------------------------------------
+// Undo (Ctrl+Z) tests
+// ---------------------------------------------------------------
+
+/// Ctrl+Z with no history does nothing.
+#[tokio::test]
+async fn test_undo_with_no_history_is_noop() {
+    let pipeline = parse_pipeline("echo a | echo b");
+    let mut app = App::new(pipeline);
+    app.pipeline.selected = 1;
+
+    app.handle_event(make_ctrl_z());
+
+    // Pipeline should be unchanged.
+    assert_eq!(app.pipeline.len(), 2);
+    assert_eq!(app.pipeline.selected, 1);
+}
+
+/// Ctrl+Z after editing a stage command restores the original command.
+#[tokio::test]
+async fn test_undo_edit_restores_original_command() {
+    let pipeline = parse_pipeline("echo a | echo b");
+    let mut app = App::new(pipeline);
+    app.pipeline.selected = 1;
+
+    // Simulate editing stage 1: confirm_edit saves to history if changed.
+    app.mode = AppMode::Editing {
+        editor: EditorState::new("echo CHANGED".to_string()),
+        pending_new_stage: false,
+    };
+    app.confirm_edit();
+
+    assert_eq!(app.pipeline.stages[1].command, "echo CHANGED");
+
+    // Undo should restore "echo b".
+    app.handle_event(make_ctrl_z());
+
+    assert_eq!(
+        app.pipeline.stages[1].command, "echo b",
+        "undo should restore the original command"
+    );
+    assert_eq!(app.pipeline.len(), 2);
+}
+
+/// Ctrl+Z after confirming an edit with no change does not add a history entry.
+#[tokio::test]
+async fn test_undo_noop_edit_does_not_save_history() {
+    let pipeline = parse_pipeline("echo a");
+    let mut app = App::new(pipeline);
+
+    // Confirm edit with same content → no history entry.
+    app.mode = AppMode::Editing {
+        editor: EditorState::new("echo a".to_string()),
+        pending_new_stage: false,
+    };
+    app.confirm_edit();
+
+    // Undo should have no history to restore.
+    app.handle_event(make_ctrl_z());
+
+    assert_eq!(app.pipeline.stages[0].command, "echo a");
+    assert_eq!(app.pipeline.len(), 1);
+}
+
+/// Ctrl+Z after an immediate delete (last/only stage) restores the pipeline.
+#[tokio::test]
+async fn test_undo_immediate_delete_restores_stage() {
+    let pipeline = parse_pipeline("echo a | echo b");
+    let mut app = App::new(pipeline);
+    app.pipeline.selected = 1; // select last stage
+
+    app.handle_event(make_key(KeyCode::Char('d')));
+    assert_eq!(app.pipeline.len(), 1, "last stage should be deleted immediately");
+
+    // Undo should restore the deleted stage.
+    app.handle_event(make_ctrl_z());
+
+    assert_eq!(app.pipeline.len(), 2, "undo should restore the deleted stage");
+    assert_eq!(app.pipeline.stages[1].command, "echo b");
+    assert_eq!(app.pipeline.selected, 1);
+}
+
+/// Ctrl+Z after a confirmed delete restores the pipeline.
+#[tokio::test]
+async fn test_undo_confirmed_delete_restores_stage() {
+    let pipeline = parse_pipeline("echo a | echo b | echo c");
+    let mut app = App::new(pipeline);
+    app.pipeline.selected = 0; // select non-last stage → requires confirmation
+
+    app.handle_event(make_key(KeyCode::Char('d')));
+    assert!(matches!(app.mode, AppMode::ConfirmingDelete));
+
+    app.handle_event(make_key(KeyCode::Char('y')));
+    assert_eq!(app.pipeline.len(), 2, "first stage should be deleted after confirmation");
+
+    // Undo should restore the deleted stage.
+    app.handle_event(make_ctrl_z());
+
+    assert_eq!(app.pipeline.len(), 3, "undo should restore the deleted stage");
+    assert_eq!(app.pipeline.stages[0].command, "echo a");
+    assert_eq!(app.pipeline.stages[1].command, "echo b");
+}
+
+/// Ctrl+Z after inserting a new stage removes it.
+#[tokio::test]
+async fn test_undo_insert_removes_new_stage() {
+    let pipeline = parse_pipeline("echo a");
+    let mut app = App::new(pipeline);
+    app.pipeline.selected = 0;
+
+    // Press 'o' to insert a new stage.
+    app.handle_event(make_key(KeyCode::Char('o')));
+    assert_eq!(app.pipeline.len(), 2, "inserting should add a new stage");
+    assert!(matches!(app.mode, AppMode::Editing { .. }));
+
+    // Confirm the edit with a command.
+    app.mode = AppMode::Editing {
+        editor: EditorState::new("grep foo".to_string()),
+        pending_new_stage: true,
+    };
+    app.confirm_edit();
+    assert_eq!(app.pipeline.len(), 2);
+    assert_eq!(app.pipeline.stages[1].command, "grep foo");
+
+    // Undo should remove the inserted stage entirely.
+    app.handle_event(make_ctrl_z());
+
+    assert_eq!(app.pipeline.len(), 1, "undo should remove the inserted stage");
+    assert_eq!(app.pipeline.stages[0].command, "echo a");
+}
+
+/// Ctrl+Z after inserting and cancelling the edit also undoes the insert.
+#[tokio::test]
+async fn test_undo_insert_cancelled_restores_pipeline() {
+    let pipeline = parse_pipeline("echo a");
+    let mut app = App::new(pipeline);
+    app.pipeline.selected = 0;
+
+    // Press 'o' to insert a new stage (saves history), then cancel.
+    app.handle_event(make_key(KeyCode::Char('o')));
+    assert_eq!(app.pipeline.len(), 2);
+    app.cancel_edit(); // removes the pending empty stage
+    assert_eq!(app.pipeline.len(), 1, "cancel should remove the pending stage");
+
+    // Undo should still restore (to the same single-stage pipeline).
+    app.handle_event(make_ctrl_z());
+    assert_eq!(app.pipeline.len(), 1);
+    assert_eq!(app.pipeline.stages[0].command, "echo a");
+}
+
+/// Multiple undos traverse the history stack sequentially.
+#[tokio::test]
+async fn test_undo_multiple_times() {
+    let pipeline = parse_pipeline("echo a");
+    let mut app = App::new(pipeline);
+    app.pipeline.selected = 0;
+
+    // Edit 1: "echo a" → "echo b"
+    app.mode = AppMode::Editing {
+        editor: EditorState::new("echo b".to_string()),
+        pending_new_stage: false,
+    };
+    app.confirm_edit();
+    assert_eq!(app.pipeline.stages[0].command, "echo b");
+
+    // Edit 2: "echo b" → "echo c"
+    app.mode = AppMode::Editing {
+        editor: EditorState::new("echo c".to_string()),
+        pending_new_stage: false,
+    };
+    app.confirm_edit();
+    assert_eq!(app.pipeline.stages[0].command, "echo c");
+
+    // First undo → "echo b"
+    app.handle_event(make_ctrl_z());
+    assert_eq!(app.pipeline.stages[0].command, "echo b");
+
+    // Second undo → "echo a"
+    app.handle_event(make_ctrl_z());
+    assert_eq!(app.pipeline.stages[0].command, "echo a");
+
+    // Third undo → nothing left in history, stays at "echo a"
+    app.handle_event(make_ctrl_z());
+    assert_eq!(app.pipeline.stages[0].command, "echo a");
+}
+
+/// Deleting all stages and then undoing restores the pipeline.
+#[tokio::test]
+async fn test_undo_delete_only_stage_restores_pipeline() {
+    let pipeline = parse_pipeline("echo hello");
+    let mut app = App::new(pipeline);
+
+    app.handle_event(make_key(KeyCode::Char('d')));
+    assert!(app.pipeline.is_empty(), "only stage should be deleted immediately");
+
+    app.handle_event(make_ctrl_z());
+
+    assert_eq!(app.pipeline.len(), 1, "undo should restore the only stage");
+    assert_eq!(app.pipeline.stages[0].command, "echo hello");
+}

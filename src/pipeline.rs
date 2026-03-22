@@ -14,7 +14,7 @@ impl PipeStage {
 }
 
 /// The full pipeline (ordered list of stages).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Pipeline {
     pub stages: Vec<PipeStage>,
     /// Index of the currently selected stage.
