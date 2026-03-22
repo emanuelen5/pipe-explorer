@@ -128,6 +128,10 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
         let stage_exit = stage_output.and_then(|o| o.exit_code);
         let stage_error = matches!(stage_exit, Some(code) if code != 0);
         let stage_mode = mode_for_stage(app, i);
+        // A stage is executing when the pipeline is running and this stage has
+        // been started but has not yet produced an exit code.
+        let stage_executing =
+            app.running && stage_output.is_some_and(|o| o.exit_code.is_none());
 
         // Compute the line count label for this stage.
         let line_count = stage_output
@@ -157,6 +161,10 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD)
+        } else if stage_executing {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
         };
@@ -181,11 +189,17 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
         cmd_spans.push(Span::styled(cmd_text.to_string(), cmd_style));
 
         // Connector span on the command line.
+        // The pipe is highlighted when there is output flowing through it.
         if !connector.is_empty() {
-            cmd_spans.push(Span::styled(
-                connector,
-                Style::default().fg(Color::DarkGray),
-            ));
+            let is_pipe_active = app.running && line_count > 0;
+            let connector_style = if is_pipe_active {
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            cmd_spans.push(Span::styled(connector, connector_style));
         }
     }
 
