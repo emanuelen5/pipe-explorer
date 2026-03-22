@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -13,6 +15,11 @@ use crate::app::{App, AppMode, OutputMode};
 pub const EDITOR_DIALOG_MAX_WIDTH: u16 = 120;
 /// Maximum width (columns) of the save-to-file dialog.
 pub const SAVE_DIALOG_MAX_WIDTH: u16 = 60;
+
+/// How long a stage/pipe highlight remains visible after the last data chunk was received.
+/// Slightly longer than the executor's UI_THROTTLE (100 ms) to prevent blinking between
+/// consecutive throttled updates.
+const DATA_ACTIVE_TIMEOUT: Duration = Duration::from_millis(101);
 
 /// Render the full TUI.
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -128,10 +135,14 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
         let stage_exit = stage_output.and_then(|o| o.exit_code);
         let stage_error = matches!(stage_exit, Some(code) if code != 0);
         let stage_mode = mode_for_stage(app, i);
-        // A stage is executing when the pipeline is running and this stage has
-        // been started but has not yet produced an exit code.
-        let stage_executing =
-            app.running && stage_output.is_some_and(|o| o.exit_code.is_none());
+        // A stage is actively receiving output when its last StageUpdate
+        // arrived within DATA_ACTIVE_TIMEOUT. This is slightly longer than
+        // the executor's throttle interval so the highlight doesn't blink.
+        let data_is_active = app
+            .stage_last_update
+            .get(i)
+            .and_then(|t| *t)
+            .is_some_and(|t| t.elapsed() < DATA_ACTIVE_TIMEOUT);
 
         // Compute the line count label for this stage.
         let line_count = stage_output
@@ -161,7 +172,7 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD)
-        } else if stage_executing {
+        } else if data_is_active {
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD)
@@ -189,10 +200,9 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
         cmd_spans.push(Span::styled(cmd_text.to_string(), cmd_style));
 
         // Connector span on the command line.
-        // The pipe is highlighted when there is output flowing through it.
+        // The pipe is highlighted while data is actively flowing through it.
         if !connector.is_empty() {
-            let is_pipe_active = app.running && line_count > 0;
-            let connector_style = if is_pipe_active {
+            let connector_style = if data_is_active {
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD)

@@ -4,6 +4,7 @@ use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
+use std::time::Instant;
 
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
@@ -181,6 +182,9 @@ pub struct App {
     pub running: bool,
     /// Show help overlay?
     pub show_help: bool,
+    /// Per-stage timestamp of the most recent `StageUpdate` message received.
+    /// Used by the renderer to highlight stages/pipes while data is actively flowing.
+    pub stage_last_update: Vec<Option<Instant>>,
     /// Cancellation token shared with the current execution.
     cancel_token: Arc<AtomicBool>,
     /// Sender for triggering background execution.
@@ -296,6 +300,7 @@ impl App {
             error_message: None,
             running: false,
             show_help: false,
+            stage_last_update: Vec::new(),
             cancel_token: Arc::new(AtomicBool::new(false)),
             exec_tx,
             exec_rx,
@@ -329,6 +334,7 @@ impl App {
         // Pre-fill stage_outputs with empty entries for incremental building.
         let count = (self.pipeline.selected + 1).min(self.pipeline.len());
         self.stage_outputs = (0..count).map(|_| StageOutput::empty()).collect();
+        self.stage_last_update = vec![None; count];
         self.running = true;
         self.error_message = None;
 
@@ -384,6 +390,7 @@ impl App {
         let (_dummy_tx, new_rx) = mpsc::channel::<StreamMsg>(1);
         self.exec_rx = new_rx;
         self.running = false;
+        self.stage_last_update.clear();
     }
 
     /// Change the output mode of a given stage.
@@ -432,6 +439,12 @@ impl App {
                 if let Some(out) = self.stage_outputs.get_mut(stage_idx) {
                     out.append_data(&new_stdout, &new_stderr, new_combined);
                 }
+                // Record the time data arrived so the renderer can highlight
+                // stages and pipes while output is actively flowing.
+                while self.stage_last_update.len() <= stage_idx {
+                    self.stage_last_update.push(None);
+                }
+                self.stage_last_update[stage_idx] = Some(Instant::now());
                 true
             }
             StreamMsg::StageDone {
