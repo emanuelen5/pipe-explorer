@@ -3,12 +3,16 @@
 pub struct PipeStage {
     /// The shell command for this stage (e.g. "jq '.[]'")
     pub command: String,
+    /// Timestamp of the most recent data chunk received from the executor.
+    /// Used by the renderer to highlight the stage/pipe while data is actively flowing.
+    pub last_update: Option<std::time::Instant>,
 }
 
 impl PipeStage {
     pub fn new(command: impl Into<String>) -> Self {
         Self {
             command: command.into(),
+            last_update: None,
         }
     }
 }

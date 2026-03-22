@@ -4,6 +4,7 @@ use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
+use std::time::Instant;
 
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
@@ -335,6 +336,10 @@ impl App {
         // Pre-fill stage_outputs with empty entries for incremental building.
         let count = (self.pipeline.selected + 1).min(self.pipeline.len());
         self.stage_outputs = (0..count).map(|_| StageOutput::empty()).collect();
+        // Reset per-stage activity timestamps for the new execution.
+        for stage in &mut self.pipeline.stages {
+            stage.last_update = None;
+        }
         self.running = true;
         self.error_message = None;
 
@@ -390,6 +395,9 @@ impl App {
         let (_dummy_tx, new_rx) = mpsc::channel::<StreamMsg>(1);
         self.exec_rx = new_rx;
         self.running = false;
+        for stage in &mut self.pipeline.stages {
+            stage.last_update = None;
+        }
     }
 
     /// Maximum number of undo/redo history entries.
@@ -485,6 +493,11 @@ impl App {
                 }
                 if let Some(out) = self.stage_outputs.get_mut(stage_idx) {
                     out.append_data(&new_stdout, &new_stderr, new_combined);
+                }
+                // Record the time data arrived on the stage itself so the
+                // renderer can highlight it while output is actively flowing.
+                if let Some(stage) = self.pipeline.stages.get_mut(stage_idx) {
+                    stage.last_update = Some(Instant::now());
                 }
                 true
             }
