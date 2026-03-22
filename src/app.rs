@@ -194,7 +194,7 @@ pub struct App {
     /// Search history shared across all pipeline stages.
     pub search_history: SearchHistory,
     /// Undo history stack: each entry is a previous pipeline state.
-    pipeline_history: Vec<Pipeline>,
+    undo_stack: Vec<Pipeline>,
     /// Redo history stack: populated by undo(), cleared on any new pipeline change.
     redo_stack: Vec<Pipeline>,
 }
@@ -306,7 +306,7 @@ impl App {
             visible_output_lines: 1, // Minimum value
             visible_output_width: 1,  // Minimum value
             search_history: SearchHistory::default(),
-            pipeline_history: Vec::new(),
+            undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         }
     }
@@ -406,13 +406,13 @@ impl App {
     /// Push the current pipeline onto the undo history stack.
     /// Clears the redo stack, since a new change branches the history.
     fn save_pipeline_state(&mut self) {
-        Self::push_capped(&mut self.pipeline_history, self.pipeline.clone());
+        Self::push_capped(&mut self.undo_stack, self.pipeline.clone());
         self.redo_stack.clear();
     }
 
     /// Undo the last pipeline change, restoring the previous pipeline state.
     pub fn undo(&mut self) {
-        if let Some(prev) = self.pipeline_history.pop() {
+        if let Some(prev) = self.undo_stack.pop() {
             let current = std::mem::replace(&mut self.pipeline, prev);
             Self::push_capped(&mut self.redo_stack, current);
             self.sync_stage_views();
@@ -429,7 +429,7 @@ impl App {
     pub fn redo(&mut self) {
         if let Some(next) = self.redo_stack.pop() {
             let current = std::mem::replace(&mut self.pipeline, next);
-            Self::push_capped(&mut self.pipeline_history, current);
+            Self::push_capped(&mut self.undo_stack, current);
             self.sync_stage_views();
             if !self.pipeline.is_empty() {
                 self.trigger_exec(false);
