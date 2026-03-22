@@ -267,11 +267,7 @@ fn render_output(frame: &mut Frame, app: &mut App, area: Rect) {
         if search_matches.is_empty() {
             " [no matches]".to_string()
         } else {
-            format!(
-                " [{}/{}]",
-                search_match_idx + 1,
-                search_matches.len()
-            )
+            format!(" [{}/{}]", search_match_idx + 1, search_matches.len())
         }
     } else {
         String::new()

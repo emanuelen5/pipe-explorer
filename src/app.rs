@@ -9,9 +9,9 @@ use std::time::Instant;
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
 use futures::StreamExt;
-use ratatui::{Terminal, backend::CrosstermBackend};
 use ratatui::text::Text;
 use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc;
 
 use crate::ansi::AnsiLineIndex;
@@ -305,7 +305,7 @@ impl App {
             exec_tx,
             exec_rx,
             visible_output_lines: 1, // Minimum value
-            visible_output_width: 1,  // Minimum value
+            visible_output_width: 1, // Minimum value
             search_history: SearchHistory::default(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),

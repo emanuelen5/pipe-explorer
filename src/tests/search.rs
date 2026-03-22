@@ -178,7 +178,7 @@ fn test_history_navigate_down_restores_modification() {
     h.push("old");
     h.push("new");
     // Go up twice to reach "old".
-    h.navigate_up("");     // at "new"
+    h.navigate_up(""); // at "new"
     h.navigate_up("new"); // at "old"
     // Modify "old" → "old_modified", then go down.
     let result = h.navigate_down("old_modified");
@@ -242,7 +242,7 @@ fn test_history_push_resets_navigation() {
     let mut h = SearchHistory::default();
     h.push("foo");
     h.navigate_up("draft"); // at "foo"
-    h.push("bar");          // should reset navigation
+    h.push("bar"); // should reset navigation
     // navigate_down from draft returns None (at draft).
     assert_eq!(h.navigate_down(""), None);
 }

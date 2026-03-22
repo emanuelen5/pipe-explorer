@@ -48,7 +48,11 @@ fn make_event(description: &str) -> Event {
         }
     }
 
-    assert_eq!(parts.len(), 1, "expected exactly one key name, got: {description:?}");
+    assert_eq!(
+        parts.len(),
+        1,
+        "expected exactly one key name, got: {description:?}"
+    );
     let key_str = parts[0];
 
     let code = match key_str {
@@ -367,6 +371,7 @@ fn test_word_right_only_whitespace() {
 
 #[test]
 fn test_editor_ctrl_left_jumps_to_word_start() {
+    #[rustfmt::skip]
     let (text, _input, before, after) = parse_pointer_description(
         "hello world",
         "           ^",
@@ -381,6 +386,7 @@ fn test_editor_ctrl_left_jumps_to_word_start() {
 
 #[test]
 fn test_editor_ctrl_right_jumps_to_next_word_start() {
+    #[rustfmt::skip]
     let (text, _input, before, after) = parse_pointer_description(
         "hello world",
         "^          ",
@@ -395,6 +401,7 @@ fn test_editor_ctrl_right_jumps_to_next_word_start() {
 
 #[test]
 fn test_editor_ctrl_left_at_beginning_stays() {
+    #[rustfmt::skip]
     let (text, _input, before, after) = parse_pointer_description(
         "hello world",
         "^          ",
@@ -409,6 +416,7 @@ fn test_editor_ctrl_left_at_beginning_stays() {
 
 #[test]
 fn test_editor_ctrl_right_at_end_stays() {
+    #[rustfmt::skip]
     let (text, _input, before, after) = parse_pointer_description(
         "hello world",
         "           ^",
@@ -945,7 +953,11 @@ async fn test_scroll_accounts_for_line_wrapping() {
     for _ in 0..20 {
         app.scroll_down(1);
     }
-    assert_eq!(app.view().scroll, 3, "scroll should be clamped to wrap-aware max");
+    assert_eq!(
+        app.view().scroll,
+        3,
+        "scroll should be clamped to wrap-aware max"
+    );
 
     // G should jump to the correct bottom.
     app.view_mut().scroll = 0;
@@ -966,7 +978,11 @@ async fn test_scroll_wrapping_all_fits() {
     app.visible_output_lines = 5;
     app.visible_output_width = 10;
 
-    assert_eq!(app.compute_max_scroll(), 0, "all content fits — max_scroll should be 0");
+    assert_eq!(
+        app.compute_max_scroll(),
+        0,
+        "all content fits — max_scroll should be 0"
+    );
 }
 
 /// Lines with ANSI escape sequences should have their display width computed
@@ -987,7 +1003,11 @@ async fn test_scroll_wrapping_with_ansi() {
     // 6 display lines (5 newlines + trailing empty).  ANSI-stripped width = 5.
     // At width=5, each line takes 1 visual row → no wrapping.
     // max_scroll = 6 - 3 = 3 (same as without wrapping).
-    assert_eq!(app.compute_max_scroll(), 3, "ANSI codes should not affect wrapping");
+    assert_eq!(
+        app.compute_max_scroll(),
+        3,
+        "ANSI codes should not affect wrapping"
+    );
 }
 
 /// Long lines followed by short lines: the short lines must be fully visible
@@ -1039,8 +1059,14 @@ async fn test_delete_last_stage_clears_outputs() {
     app.handle_event(make_key(KeyCode::Char('d')));
 
     assert!(app.pipeline.is_empty(), "pipeline should be empty");
-    assert!(app.stage_outputs.is_empty(), "stage_outputs should be cleared");
-    assert!(!app.running, "running should be false after deleting all stages");
+    assert!(
+        app.stage_outputs.is_empty(),
+        "stage_outputs should be cleared"
+    );
+    assert!(
+        !app.running,
+        "running should be false after deleting all stages"
+    );
 }
 
 /// After deleting all stages, a stale StageUpdate message must not
@@ -1090,15 +1116,28 @@ async fn test_confirm_delete_then_immediate_delete_clears_outputs() {
 
     // Confirm the delete with 'y'.
     app.handle_event(make_key(KeyCode::Char('y')));
-    assert_eq!(app.pipeline.len(), 1, "one stage should remain after confirm delete");
-    assert!(app.running, "exec should be triggered for the remaining stage");
+    assert_eq!(
+        app.pipeline.len(),
+        1,
+        "one stage should remain after confirm delete"
+    );
+    assert!(
+        app.running,
+        "exec should be triggered for the remaining stage"
+    );
 
     // Now delete the last remaining stage (immediate delete, no confirm).
     app.handle_event(make_key(KeyCode::Char('d')));
 
     assert!(app.pipeline.is_empty(), "pipeline should be empty");
-    assert!(app.stage_outputs.is_empty(), "stage_outputs should be cleared");
-    assert!(!app.running, "running should be false after deleting all stages");
+    assert!(
+        app.stage_outputs.is_empty(),
+        "stage_outputs should be cleared"
+    );
+    assert!(
+        !app.running,
+        "running should be false after deleting all stages"
+    );
 }
 
 // ---------------------------------------------------------------

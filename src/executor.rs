@@ -869,7 +869,6 @@ pub fn run_pipeline_streaming(
     let _ = ui_tx.send(StreamMsg::AllDone { error: None });
 }
 
-
 #[cfg(test)]
 #[path = "tests/executor.rs"]
 mod tests;
