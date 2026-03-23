@@ -378,3 +378,93 @@ fn no_line_index_for_combined_mode() {
     let out = StageOutput::empty();
     assert!(out.line_index(OutputMode::Combined).is_none());
 }
+
+// ---------------------------------------------------------------
+// inject_pre_fill / relay_bytes tests
+// ---------------------------------------------------------------
+
+/// `relay_bytes` returns ANSI-stripped stdout for `OutputMode::Stdout`.
+#[test]
+fn relay_bytes_stdout_strips_ansi() {
+    let out = StageOutput::new(
+        b"\x1b[31mhello\x1b[0m\n".to_vec(),
+        b"err\n".to_vec(),
+        Some(0),
+        vec![],
+    );
+    assert_eq!(out.relay_bytes(OutputMode::Stdout), b"hello\n");
+}
+
+/// `relay_bytes` returns ANSI-stripped stderr for `OutputMode::Stderr`.
+#[test]
+fn relay_bytes_stderr_strips_ansi() {
+    let out = StageOutput::new(
+        b"out\n".to_vec(),
+        b"\x1b[31merr\x1b[0m\n".to_vec(),
+        Some(0),
+        vec![],
+    );
+    assert_eq!(out.relay_bytes(OutputMode::Stderr), b"err\n");
+}
+
+/// `relay_bytes` for `Combined` mode interleaves stdout and stderr lines in
+/// arrival order (via `combined`) and strips ANSI sequences.
+#[test]
+fn relay_bytes_combined_interleaves_and_strips_ansi() {
+    let out = StageOutput::new(
+        b"out\n".to_vec(),
+        b"err\n".to_vec(),
+        Some(0),
+        vec![
+            CombinedLine {
+                is_stderr: false,
+                content: b"\x1b[32mout\x1b[0m\n".to_vec(),
+            },
+            CombinedLine {
+                is_stderr: true,
+                content: b"\x1b[31merr\x1b[0m\n".to_vec(),
+            },
+        ],
+    );
+    let relay = out.relay_bytes(OutputMode::Combined);
+    assert_eq!(relay, b"out\nerr\n");
+}
+
+/// `inject_pre_fill` inserts entries into the cache so that subsequent
+/// lookups are cache hits.  This simulates the scenario where a stage was
+/// running when the user inserted a new stage after it: the accumulated
+/// output is injected so the executor can serve it immediately without
+/// restarting the command.
+#[test]
+fn inject_pre_fill_prevents_stage_restart() {
+    let mut cache = ExecutorCache::new();
+
+    // Simulate stage 0 ("echo hello") having already run and produced output.
+    // In practice this output would have been accumulated incrementally while
+    // the command was streaming; here we construct it directly.
+    let stage0_output = StageOutput::new(b"hello\n".to_vec(), b"".to_vec(), Some(0), vec![]);
+
+    // Pre-fill the cache as `trigger_exec` would do when a new stage is
+    // inserted after stage 0.
+    let entries = vec![PreFillEntry {
+        command: "echo hello".to_string(),
+        stdin: vec![],
+        output: stage0_output.clone(),
+    }];
+    cache.inject_pre_fill(&entries);
+
+    // A subsequent lookup for stage 0 must be a cache hit with the same data.
+    let hit = cache
+        .lookup("echo hello", b"")
+        .expect("expected cache hit after inject_pre_fill");
+    assert_eq!(hit.stdout, stage0_output.stdout);
+
+    // A pipeline run that includes stage 0 and a new stage 1 (wc -w) should
+    // now serve stage 0 from cache and only execute stage 1.
+    let commands = vec!["echo hello".to_string(), "wc -w".to_string()];
+    let outputs = execute_pipeline_stages(&mut cache, &commands, 1, false, &[]).unwrap();
+    assert_eq!(outputs.len(), 2);
+    // Stage 1 counts words in "hello\n" → 1 word.
+    let word_count: u32 = outputs[1].stdout_str().trim().parse().unwrap();
+    assert_eq!(word_count, 1);
+}
