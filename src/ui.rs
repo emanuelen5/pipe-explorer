@@ -198,9 +198,15 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
         cmd_spans.push(Span::styled(cmd_text.to_string(), cmd_style));
 
         // Connector span on the command line.
-        // The pipe is highlighted while data is actively flowing through it.
+        // The pipe is highlighted while data is actively flowing through it:
+        // either stage i is producing output (data entering the connector) or
+        // stage i+1 is actively consuming output (data leaving the connector).
         if !connector.is_empty() {
-            let connector_style = if data_is_active {
+            let next_data_is_active = app.pipeline.stages.get(i + 1).is_some_and(|s| {
+                s.last_update
+                    .is_some_and(|t| t.elapsed() < DATA_ACTIVE_TIMEOUT)
+            });
+            let connector_style = if data_is_active || next_data_is_active {
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD)

@@ -508,6 +508,11 @@ impl App {
                 if let Some(out) = self.stage_outputs.get_mut(stage_idx) {
                     out.exit_code = exit_code;
                 }
+                // Data is no longer flowing into this stage; clear the
+                // activity timestamp so the highlight resets immediately.
+                if let Some(stage) = self.pipeline.stages.get_mut(stage_idx) {
+                    stage.last_update = None;
+                }
                 true
             }
             StreamMsg::AllDone { error } => {
@@ -516,6 +521,12 @@ impl App {
                     if err != "cancelled" {
                         self.error_message = Some(err);
                     }
+                }
+                // Ensure all activity highlights are cleared when the entire
+                // pipeline finishes (covers cancellation and other edge cases
+                // where individual StageDone messages may not have been sent).
+                for stage in &mut self.pipeline.stages {
+                    stage.last_update = None;
                 }
                 self.compute_search_matches();
                 true

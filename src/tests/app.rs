@@ -1496,3 +1496,67 @@ async fn test_undo_redo_delete() {
     assert_eq!(app.pipeline.len(), 1);
     assert_eq!(app.pipeline.stages[0].command, "echo a");
 }
+
+/// `StageDone` must clear the activity timestamp so the highlight resets
+/// immediately rather than waiting for the 101 ms timeout to expire.
+#[tokio::test]
+async fn test_stage_done_clears_last_update() {
+    let pipeline = parse_pipeline("echo a | echo b");
+    let mut app = App::new(pipeline);
+    app.stage_outputs = vec![StageOutput::empty(), StageOutput::empty()];
+
+    // Simulate data arriving on stage 0.
+    app.handle_stream_msg(StreamMsg::StageUpdate {
+        stage_idx: 0,
+        new_stdout: b"a\n".to_vec(),
+        new_stderr: vec![],
+        new_combined: vec![],
+    });
+    assert!(
+        app.pipeline.stages[0].last_update.is_some(),
+        "last_update should be set after StageUpdate"
+    );
+
+    // Stage 0 finishes; its highlight must clear immediately.
+    app.handle_stream_msg(StreamMsg::StageDone {
+        stage_idx: 0,
+        exit_code: Some(0),
+    });
+    assert!(
+        app.pipeline.stages[0].last_update.is_none(),
+        "last_update should be None after StageDone"
+    );
+}
+
+/// `AllDone` must clear the activity timestamp on every stage so that no
+/// highlights linger after the pipeline finishes (covers cancellation and
+/// other cases where individual StageDone messages may not have arrived).
+#[tokio::test]
+async fn test_all_done_clears_all_last_updates() {
+    let pipeline = parse_pipeline("echo a | echo b");
+    let mut app = App::new(pipeline);
+    app.stage_outputs = vec![StageOutput::empty(), StageOutput::empty()];
+
+    // Simulate data arriving on both stages.
+    for idx in 0..2 {
+        app.handle_stream_msg(StreamMsg::StageUpdate {
+            stage_idx: idx,
+            new_stdout: b"x\n".to_vec(),
+            new_stderr: vec![],
+            new_combined: vec![],
+        });
+    }
+    assert!(app.pipeline.stages[0].last_update.is_some());
+    assert!(app.pipeline.stages[1].last_update.is_some());
+
+    // Entire pipeline finishes; all highlights must clear.
+    app.handle_stream_msg(StreamMsg::AllDone { error: None });
+    assert!(
+        app.pipeline.stages[0].last_update.is_none(),
+        "stage 0 last_update should be None after AllDone"
+    );
+    assert!(
+        app.pipeline.stages[1].last_update.is_none(),
+        "stage 1 last_update should be None after AllDone"
+    );
+}
