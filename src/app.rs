@@ -167,8 +167,15 @@ struct ExecRequest {
     result_tx: std_mpsc::Sender<StreamMsg>,
 }
 
-/// Cached result of `compute_max_scroll` together with the inputs that produced it.
-/// When all inputs match, the expensive line-wrapping computation can be skipped.
+/// Cached result of `compute_max_scroll`.
+///
+/// Stores the last computed `max_scroll` value alongside the window geometry,
+/// output mode, selected stage, and total line count used to produce it.
+/// When geometry/mode/stage are unchanged the cached value can be updated in
+/// O(1): if lines were appended outside the viewport `max_scroll` simply grows
+/// by the number of new lines.  A full re-computation is only needed after a
+/// terminal resize, mode/stage switch, or when the viewport overlaps the new
+/// content.
 #[derive(Debug)]
 struct MaxScrollCache {
     total_lines: usize,
@@ -669,16 +676,18 @@ impl App {
     /// as rendering), and stops once enough lines have been found to fill
     /// the visible output area.
     ///
-    /// Two fast paths avoid the expensive backward walk:
+    /// The expensive backward walk is skipped whenever the window geometry,
+    /// output mode, and selected stage are all unchanged from the previous
+    /// call:
     ///
-    /// 1. **Exact cache hit** — all inputs (line count, dimensions, mode, stage)
-    ///    are identical to the previous call: return the cached value in O(1).
-    /// 2. **Out-of-view append** — lines were appended at the end and the
-    ///    current viewport lies entirely within the previously-known content
-    ///    (`scroll + visible ≤ old_total`).  For typical non-wrapping output
-    ///    the set of bottom lines that fit in the viewport is unchanged, so
-    ///    `max_scroll` simply grows by the number of new lines — still O(1),
-    ///    no per-line `Paragraph` construction needed.
+    /// - **No new lines** (`total == old_total`) → return cached value as-is.
+    /// - **Lines appended outside the viewport** (`scroll + visible ≤ old_total`)
+    ///   → `max_scroll` grows by the number of appended lines in O(1); no
+    ///   per-line `Paragraph` construction needed.
+    ///
+    /// The full backward walk is only triggered by a terminal resize, an
+    /// output-mode switch, a stage selection change, or when the viewport
+    /// overlaps newly-appended content.
     pub fn compute_max_scroll(&mut self) -> usize {
         let total = self.output_line_count();
         let width = self.visible_output_width;
@@ -692,49 +701,36 @@ impl App {
             return 0;
         }
 
-        // Fast path 1: exact cache hit — nothing has changed.
+        // Fast path: window geometry, mode, and stage are unchanged.
+        // Either nothing changed (delta == 0) or lines were appended entirely
+        // below the current viewport — in both cases the set of lines that
+        // fill the bottom of the visible area is identical to the last
+        // computation, so max_scroll simply grows by the number of new lines.
         if let Some(ref c) = self.max_scroll_cache
-            && c.total_lines == total
             && c.visible_width == width
             && c.visible_lines == visible
             && c.output_mode == mode
             && c.selected_stage == selected
         {
-            return c.value;
-        }
-
-        // Fast path 2: lines were appended outside the visible window.
-        //
-        // When the viewport (`scroll .. scroll + visible`) lies entirely within
-        // the *previously* known content (`scroll + visible <= c.total_lines`),
-        // none of the new lines are visible.  For typical (non-wrapping) output
-        // the number of lines that fit from the bottom is unchanged, so
-        // `max_scroll` grows by exactly the number of newly-appended lines —
-        // no per-line `Paragraph` construction needed.
-        let append_shortcut = self.max_scroll_cache.as_ref().and_then(|c| {
-            if c.visible_width == width
-                && c.visible_lines == visible
-                && c.output_mode == mode
-                && c.selected_stage == selected
-                && total > c.total_lines // lines were appended, not removed
-                && scroll + visible <= c.total_lines
-            // viewport above new lines
-            {
-                Some(c.value + (total - c.total_lines))
-            } else {
-                None
+            if total == c.total_lines {
+                // Nothing changed at all.
+                return c.value;
             }
-        });
-        if let Some(new_value) = append_shortcut {
-            self.max_scroll_cache = Some(MaxScrollCache {
-                total_lines: total,
-                visible_width: width,
-                visible_lines: visible,
-                output_mode: mode,
-                selected_stage: selected,
-                value: new_value,
-            });
-            return new_value;
+            if total > c.total_lines && scroll + visible <= c.total_lines {
+                // Lines appended outside the viewport.
+                let new_value = c.value + (total - c.total_lines);
+                // Update total_lines and value in-place; the borrow ends here.
+                let new_cache = MaxScrollCache {
+                    total_lines: total,
+                    visible_width: width,
+                    visible_lines: visible,
+                    output_mode: mode,
+                    selected_stage: selected,
+                    value: new_value,
+                };
+                self.max_scroll_cache = Some(new_cache);
+                return new_value;
+            }
         }
 
         // Slow path: recompute the max scroll position.
