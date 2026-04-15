@@ -669,23 +669,30 @@ impl App {
     /// as rendering), and stops once enough lines have been found to fill
     /// the visible output area.
     ///
-    /// The result is cached: if `total_lines`, `visible_width`, `visible_lines`,
-    /// `output_mode`, and `selected_stage` are all unchanged from the previous
-    /// call the cached value is returned immediately, avoiding the per-line
-    /// `Paragraph` construction on every keystroke while editing.
+    /// Two fast paths avoid the expensive backward walk:
+    ///
+    /// 1. **Exact cache hit** — all inputs (line count, dimensions, mode, stage)
+    ///    are identical to the previous call: return the cached value in O(1).
+    /// 2. **Out-of-view append** — lines were appended at the end and the
+    ///    current viewport lies entirely within the previously-known content
+    ///    (`scroll + visible ≤ old_total`).  For typical non-wrapping output
+    ///    the set of bottom lines that fit in the viewport is unchanged, so
+    ///    `max_scroll` simply grows by the number of new lines — still O(1),
+    ///    no per-line `Paragraph` construction needed.
     pub fn compute_max_scroll(&mut self) -> usize {
         let total = self.output_line_count();
         let width = self.visible_output_width;
         let visible = self.visible_output_lines;
         let mode = self.view().output_mode;
         let selected = self.pipeline.selected;
+        let scroll = self.view().scroll;
 
         if total == 0 || width == 0 || visible == 0 {
             self.max_scroll_cache = None;
             return 0;
         }
 
-        // Fast path: return the cached value when nothing has changed.
+        // Fast path 1: exact cache hit — nothing has changed.
         if let Some(ref c) = self.max_scroll_cache
             && c.total_lines == total
             && c.visible_width == width
@@ -694,6 +701,40 @@ impl App {
             && c.selected_stage == selected
         {
             return c.value;
+        }
+
+        // Fast path 2: lines were appended outside the visible window.
+        //
+        // When the viewport (`scroll .. scroll + visible`) lies entirely within
+        // the *previously* known content (`scroll + visible <= c.total_lines`),
+        // none of the new lines are visible.  For typical (non-wrapping) output
+        // the number of lines that fit from the bottom is unchanged, so
+        // `max_scroll` grows by exactly the number of newly-appended lines —
+        // no per-line `Paragraph` construction needed.
+        let append_shortcut = self.max_scroll_cache.as_ref().and_then(|c| {
+            if c.visible_width == width
+                && c.visible_lines == visible
+                && c.output_mode == mode
+                && c.selected_stage == selected
+                && total > c.total_lines // lines were appended, not removed
+                && scroll + visible <= c.total_lines
+            // viewport above new lines
+            {
+                Some(c.value + (total - c.total_lines))
+            } else {
+                None
+            }
+        });
+        if let Some(new_value) = append_shortcut {
+            self.max_scroll_cache = Some(MaxScrollCache {
+                total_lines: total,
+                visible_width: width,
+                visible_lines: visible,
+                output_mode: mode,
+                selected_stage: selected,
+                value: new_value,
+            });
+            return new_value;
         }
 
         // Slow path: recompute the max scroll position.
