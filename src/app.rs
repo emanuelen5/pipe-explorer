@@ -167,6 +167,18 @@ struct ExecRequest {
     result_tx: std_mpsc::Sender<StreamMsg>,
 }
 
+/// Cached result of `compute_max_scroll` together with the inputs that produced it.
+/// When all inputs match, the expensive line-wrapping computation can be skipped.
+#[derive(Debug)]
+struct MaxScrollCache {
+    total_lines: usize,
+    visible_width: usize,
+    visible_lines: usize,
+    output_mode: OutputMode,
+    selected_stage: usize,
+    value: usize,
+}
+
 /// Full application state.
 pub struct App {
     pub pipeline: Pipeline,
@@ -198,6 +210,12 @@ pub struct App {
     undo_stack: Vec<Pipeline>,
     /// Redo history stack: populated by undo(), cleared on any new pipeline change.
     redo_stack: Vec<Pipeline>,
+    /// Cached result of the last `compute_max_scroll` call.
+    /// Invalidated automatically when any input (line count, dimensions, mode,
+    /// or selected stage) changes, so the expensive line-wrapping walk is only
+    /// repeated when the output or viewport actually changes — not on every
+    /// keystroke in the editor.
+    max_scroll_cache: Option<MaxScrollCache>,
 }
 
 /// Return the byte offset within `before_cursor` where the previous word begins.
@@ -309,6 +327,7 @@ impl App {
             search_history: SearchHistory::default(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            max_scroll_cache: None,
         }
     }
 
@@ -649,18 +668,38 @@ impl App {
     /// counts (via `Paragraph::line_count`, which uses the same `WordWrapper`
     /// as rendering), and stops once enough lines have been found to fill
     /// the visible output area.
-    pub fn compute_max_scroll(&self) -> usize {
+    ///
+    /// The result is cached: if `total_lines`, `visible_width`, `visible_lines`,
+    /// `output_mode`, and `selected_stage` are all unchanged from the previous
+    /// call the cached value is returned immediately, avoiding the per-line
+    /// `Paragraph` construction on every keystroke while editing.
+    pub fn compute_max_scroll(&mut self) -> usize {
         let total = self.output_line_count();
         let width = self.visible_output_width;
         let visible = self.visible_output_lines;
+        let mode = self.view().output_mode;
+        let selected = self.pipeline.selected;
 
         if total == 0 || width == 0 || visible == 0 {
+            self.max_scroll_cache = None;
             return 0;
         }
 
+        // Fast path: return the cached value when nothing has changed.
+        if let Some(ref c) = self.max_scroll_cache
+            && c.total_lines == total
+            && c.visible_width == width
+            && c.visible_lines == visible
+            && c.output_mode == mode
+            && c.selected_stage == selected
+        {
+            return c.value;
+        }
+
+        // Slow path: recompute the max scroll position.
         // In combined mode each line is prefixed with a 1-column margin,
         // reducing the effective width available for content.
-        let effective_width = if matches!(self.view().output_mode, OutputMode::Combined) {
+        let effective_width = if matches!(mode, OutputMode::Combined) {
             (width as u16).saturating_sub(1).max(1)
         } else {
             width as u16
@@ -699,7 +738,18 @@ impl App {
             }
         }
 
-        total.saturating_sub(lines_from_end)
+        let value = total.saturating_sub(lines_from_end);
+
+        self.max_scroll_cache = Some(MaxScrollCache {
+            total_lines: total,
+            visible_width: width,
+            visible_lines: visible,
+            output_mode: mode,
+            selected_stage: selected,
+            value,
+        });
+
+        value
     }
 
     /// Save current output text to a file.

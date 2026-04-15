@@ -1042,6 +1042,58 @@ async fn test_scroll_long_lines_followed_by_short() {
     assert_eq!(app.view().scroll, 3);
 }
 
+/// `compute_max_scroll` caches its result and returns the cached value on
+/// repeated calls when the inputs (line count, dimensions, mode, selected
+/// stage) are unchanged.  The cache must be invalidated when any input
+/// changes so the correct value is returned after the change.
+#[tokio::test]
+async fn test_compute_max_scroll_cache() {
+    let pipeline = parse_pipeline("echo a");
+    let mut app = App::new(pipeline);
+
+    app.stage_outputs = vec![make_stage_output("1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n")];
+    app.visible_output_lines = 3;
+    app.visible_output_width = 80;
+
+    // Cache is empty before the first call.
+    assert!(app.max_scroll_cache.is_none(), "cache should start empty");
+
+    let first = app.compute_max_scroll();
+    // Cache should be populated after the first call.
+    assert!(
+        app.max_scroll_cache.is_some(),
+        "cache should be populated after first call"
+    );
+
+    // Second call with identical inputs must return the same value (cache hit).
+    let second = app.compute_max_scroll();
+    assert_eq!(first, second, "repeated call should return the same value");
+
+    // Adding more output increases total_lines → cache miss → new value.
+    app.stage_outputs = vec![make_stage_output(
+        "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n15\n",
+    )];
+    let after_more_output = app.compute_max_scroll();
+    assert!(
+        after_more_output > first,
+        "more lines should yield a larger max_scroll"
+    );
+    // Cache key should now reflect the new total_lines.
+    assert_eq!(
+        app.max_scroll_cache.as_ref().unwrap().total_lines,
+        app.output_line_count(),
+        "cache key should reflect updated total_lines"
+    );
+
+    // Changing visible dimensions must also invalidate the cache.
+    app.visible_output_lines = 10;
+    let with_more_visible = app.compute_max_scroll();
+    assert!(
+        with_more_visible < after_more_output,
+        "taller viewport should reduce max_scroll"
+    );
+}
+
 // ---------------------------------------------------------------
 // Stage deletion tests
 // ---------------------------------------------------------------
