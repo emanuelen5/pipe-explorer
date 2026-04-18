@@ -83,16 +83,42 @@ impl Pipeline {
             }
         }
     }
+
+    pub fn from_commands(cmds: Vec<String>, parse: bool) -> Self {
+        let mut stages: Vec<PipeStage> = vec![];
+        let mut subcmds: Vec<String> = vec![];
+        for cmd in cmds {
+            if cmd.trim() == "|" {
+                stages.push(PipeStage::new(subcmds.join(" ")));
+                subcmds.clear();
+            } else if parse {
+                // Flush any accumulated subcmds before splitting
+                if !subcmds.is_empty() {
+                    stages.push(PipeStage::new(subcmds.join(" ")));
+                    subcmds.clear();
+                }
+                let parts = split_pipeline_stages(&cmd);
+                for part in parts {
+                    let trimmed = part.trim();
+                    if !trimmed.is_empty() {
+                        stages.push(PipeStage::new(trimmed));
+                    }
+                }
+            } else {
+                subcmds.push(cmd);
+            }
+        }
+        if !subcmds.is_empty() {
+            stages.push(PipeStage::new(subcmds.join(" ")));
+        }
+        Self::new(stages)
+    }
 }
 
-/// Parse a pipeline string (e.g. "cmd1 | cmd2 | cmd3") into a Pipeline.
+// Just used in tests for easy pipeline creation from a single string like "a | b | c".
+#[allow(dead_code)]
 pub fn parse_pipeline(s: &str) -> Pipeline {
-    let stages: Vec<PipeStage> = split_pipeline_stages(s)
-        .into_iter()
-        .map(|part| PipeStage::new(part.trim()))
-        .filter(|s| !s.command.is_empty())
-        .collect();
-    Pipeline::new(stages)
+    return Pipeline::from_commands(vec![s.to_string()], true);
 }
 
 fn split_pipeline_stages(s: &str) -> Vec<&str> {

@@ -55,3 +55,39 @@ fn test_insert_remove() {
     p.remove_selected();
     assert_eq!(p.stages.len(), 2);
 }
+
+#[test]
+fn test_parse_pipeline_from_commands_with_split() {
+    let p = Pipeline::from_commands(
+        vec!["echo hello".to_string(), "grep hello | wc -l".to_string()],
+        true,
+    );
+    assert_eq!(p.stages[0].command, "echo hello");
+    assert_eq!(p.stages[1].command, "grep hello");
+    assert_eq!(p.stages[2].command, "wc -l");
+    assert_eq!(p.stages.len(), 3);
+}
+
+#[test]
+fn test_parse_pipeline_from_commands() {
+    let p = Pipeline::from_commands(vec!["echo".to_string(), "hello".to_string()], false);
+    assert_eq!(p.stages[0].command, "echo hello");
+    assert_eq!(p.stages.len(), 1);
+}
+
+#[test]
+fn test_parse_pipeline_from_commands_with_pipe() {
+    let p = Pipeline::from_commands(
+        vec![
+            "echo".to_string(),
+            "hello".to_string(),
+            "|".to_string(),
+            "grep".to_string(),
+            "hello".to_string(),
+        ],
+        false,
+    );
+    assert_eq!(p.stages[0].command, "echo hello");
+    assert_eq!(p.stages[1].command, "grep hello");
+    assert_eq!(p.stages.len(), 2);
+}
