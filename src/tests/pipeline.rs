@@ -91,3 +91,27 @@ fn test_parse_pipeline_from_commands_with_pipe() {
     assert_eq!(p.stages[1].command, "grep hello");
     assert_eq!(p.stages.len(), 2);
 }
+
+#[test]
+fn test_from_commands_requotes_args_with_special_chars() {
+    // Simulates: cargo run -- gh api repos/owner/repo/commits \| jq -r '.[] | "\(.sha)"'
+    // The shell delivers these argv entries (quotes stripped, \| → |):
+    let p = Pipeline::from_commands(
+        vec![
+            "gh".into(),
+            "api".into(),
+            "repos/owner/repo/commits".into(),
+            "|".into(),
+            "jq".into(),
+            "-r".into(),
+            r#".[] | "\(.sha): \(.commit.author.date)""#.into(),
+        ],
+        false,
+    );
+    assert_eq!(p.stages[0].command, "gh api repos/owner/repo/commits");
+    assert_eq!(
+        p.stages[1].command,
+        r#"jq -r '.[] | "\(.sha): \(.commit.author.date)"'"#,
+    );
+    assert_eq!(p.stages.len(), 2);
+}
