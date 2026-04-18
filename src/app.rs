@@ -19,7 +19,7 @@ pub use crate::executor::OutputMode;
 use crate::executor::{ExecutorCache, StageOutput, StreamMsg, run_pipeline_streaming};
 use crate::pipeline::Pipeline;
 use crate::search::{SearchHistory, SearchState};
-use crate::ui;
+use crate::ui::{self, trigger_terminal_bell};
 
 /// Per-stage view state (output mode, search, scroll position).
 #[derive(Debug)]
@@ -1287,10 +1287,9 @@ impl App {
                     .filter(|&&cmd| cmd.starts_with(editor.content.as_str()))
                     .copied()
                     .collect();
-                const BELL: &str = "\x07";
                 match matches.len() {
                     0 => {
-                        print!("{}", BELL);
+                        trigger_terminal_bell();
                     }
                     1 => {
                         // Unique match — complete in full
@@ -1311,8 +1310,8 @@ impl App {
                         }
                         editor.content = common_prefix.clone();
                         editor.cursor = common_prefix.len();
-                        print!("{}", BELL);
                         self.command_completions = Some(matches.join("  "));
+                        trigger_terminal_bell();
                     }
                 }
             }
