@@ -66,7 +66,7 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
     if app.pipeline.is_empty() {
         let msg = Paragraph::new("No stages — press 'o' to add a new stage")
             .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::TOP).title("- Pipeline "));
+            .block(Block::default().borders(Borders::TOP).title("— Pipeline "));
         frame.render_widget(msg, area);
         return;
     }
@@ -102,15 +102,15 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
         Style::default()
     };
     let title = if any_error {
-        "- Pipeline ✗ "
+        "— Pipeline ✗ "
     } else {
-        "- Pipeline "
+        "— Pipeline "
     };
     let block = Block::default()
         .borders(Borders::TOP)
         .title(title)
         .title_top(
-            ratatui::text::Line::from(format!(" {} -", detail_label)).alignment(Alignment::Right),
+            ratatui::text::Line::from(format!("— {} -", detail_label)).alignment(Alignment::Right),
         )
         .style(block_style);
     let inner = block.inner(area);
@@ -262,21 +262,30 @@ fn render_output(frame: &mut Frame, app: &mut App, area: Rect) {
     };
 
     // Include search match count when a search is active.
-    let search_info = if !search_query.is_empty() {
+    let search_span = if !search_query.is_empty() {
         if search_matches.is_empty() {
-            " [no matches]".to_string()
+            Span::styled(" [no matches]", Style::default().fg(Color::Red))
         } else {
-            format!(" [{}/{}]", search_match_idx + 1, search_matches.len())
+            Span::styled(
+                format!(" [{}/{}]", search_match_idx + 1, search_matches.len()),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
         }
     } else {
-        String::new()
+        Span::raw("")
     };
 
-    let title = format!("- {} — {}{} ", mode_label, exit_info, search_info,);
+    let title_line = Line::from(vec![
+        Span::raw(format!("— {} — {}", mode_label, exit_info)),
+        search_span,
+        Span::raw(" "),
+    ]);
 
     let block = Block::default()
         .borders(Borders::TOP | Borders::BOTTOM)
-        .title(title);
+        .title(title_line);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
