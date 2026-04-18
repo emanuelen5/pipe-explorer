@@ -194,6 +194,8 @@ pub struct App {
     pub visible_output_width: usize,
     /// Search history shared across all pipeline stages.
     pub search_history: SearchHistory,
+    /// Tab-completion candidates shown in the command bar (set on ambiguous Tab).
+    pub command_completions: Option<String>,
     /// Undo history stack: each entry is a previous pipeline state.
     undo_stack: Vec<Pipeline>,
     /// Redo history stack: populated by undo(), cleared on any new pipeline change.
@@ -307,6 +309,7 @@ impl App {
             visible_output_lines: 1, // Minimum value
             visible_output_width: 1, // Minimum value
             search_history: SearchHistory::default(),
+            command_completions: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         }
@@ -1269,10 +1272,11 @@ impl App {
 
     /// Handle a key event while in command mode (`:` prompt).
     fn handle_command_key(&mut self, key: KeyEvent) -> bool {
-        let Some(editor) = self.editor_mut() else {
+        let AppMode::Command(ref mut editor) = self.mode else {
             return false;
         };
 
+        self.command_completions = None;
         match key.code {
             KeyCode::Esc => {
                 self.mode = AppMode::Normal;
@@ -1319,11 +1323,12 @@ impl App {
                         editor.content = common_prefix.clone();
                         editor.cursor = common_prefix.len();
                         print!("{}", BELL);
+                        self.command_completions = Some(matches.join("  "));
                     }
                 }
             }
             _ => {
-                if editor.content.len() == 0 && key.code == KeyCode::Backspace {
+                if editor.content.is_empty() && key.code == KeyCode::Backspace {
                     self.mode = AppMode::Normal;
                 } else {
                     editor.handle_key(key);
