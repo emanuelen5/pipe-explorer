@@ -7,6 +7,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
+use std::io::Write;
 
 use crate::ansi::ansi_text_to_visible_lines;
 use crate::app::{App, AppMode, OutputMode};
@@ -20,6 +21,11 @@ pub const SAVE_DIALOG_MAX_WIDTH: u16 = 60;
 /// Slightly longer than the executor's UI_THROTTLE (100 ms) to prevent blinking between
 /// consecutive throttled updates.
 const DATA_ACTIVE_TIMEOUT: Duration = Duration::from_millis(101);
+
+pub fn trigger_terminal_bell() {
+    let _ = write!(std::io::stdout(), "\x07");
+    let _ = std::io::stdout().flush();
+}
 
 /// Render the full TUI.
 pub fn render(frame: &mut Frame, app: &mut App) {
