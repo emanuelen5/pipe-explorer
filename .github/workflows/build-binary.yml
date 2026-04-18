@@ -1,0 +1,74 @@
+name: Build Binary
+
+on:
+  workflow_call:
+    inputs:
+      os:
+        required: true
+        type: string
+      target:
+        required: true
+        type: string
+      archive:
+        required: true
+        type: string
+
+jobs:
+  build:
+    name: ${{ inputs.target }}
+    runs-on: ${{ inputs.os }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ inputs.target }}
+
+      - name: Install musl-tools (Linux only)
+        if: inputs.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get install -y musl-tools
+
+      - name: Cache Cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ inputs.target }}-cargo-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ inputs.target }}-cargo-
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ inputs.target }}
+
+      - name: Package binary (Unix)
+        if: inputs.archive == 'tar.gz'
+        run: |
+          ASSET_NAME="pipe-explorer-${{ inputs.target }}"
+          mkdir -p "$ASSET_NAME"
+          cp "target/${{ inputs.target }}/release/pipe-explorer" "$ASSET_NAME/"
+          cp README.md LICENSE "$ASSET_NAME/"
+          tar -czf "${ASSET_NAME}.tar.gz" "$ASSET_NAME"
+          echo "ASSET=${ASSET_NAME}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Package binary (Windows)
+        if: inputs.archive == 'zip'
+        shell: pwsh
+        run: |
+          $AssetName = "pipe-explorer-${{ inputs.target }}"
+          New-Item -ItemType Directory -Path $AssetName | Out-Null
+          Copy-Item "target\${{ inputs.target }}\release\pipe-explorer.exe" "$AssetName\"
+          Copy-Item README.md, LICENSE "$AssetName\"
+          Compress-Archive -Path "$AssetName" -DestinationPath "${AssetName}.zip"
+          "ASSET=${AssetName}.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipe-explorer-${{ inputs.target }}
+          path: ${{ env.ASSET }}
+          if-no-files-found: error
