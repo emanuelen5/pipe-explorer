@@ -539,10 +539,18 @@ fn render_command_bar(frame: &mut Frame, app: &App, area: Rect) {
 
     let mut spans = vec![prefix];
     spans.extend(cursor_spans);
-    spans.push(Span::styled(
-        "  [Tab]complete  [Enter]run  [Esc]cancel",
-        Style::default().fg(Color::DarkGray),
-    ));
+
+    if let Some(completions) = &app.command_completions {
+        spans.push(Span::styled(
+            format!("  {}", completions),
+            Style::default().fg(Color::Cyan),
+        ));
+    } else {
+        spans.push(Span::styled(
+            "  [Tab]complete  [Enter]run  [Esc]cancel",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
