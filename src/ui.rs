@@ -29,7 +29,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4), // Stages bar (2 content rows: counts + command)
+            Constraint::Length(3), // Stages bar (2 content rows: counts + command)
             Constraint::Min(0),    // Output pager
             Constraint::Length(1), // Status bar
         ])
@@ -66,7 +66,7 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
     if app.pipeline.is_empty() {
         let msg = Paragraph::new("No stages — press 'o' to add a new stage")
             .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::ALL).title(" Pipeline "));
+            .block(Block::default().borders(Borders::TOP).title("- Pipeline "));
         frame.render_widget(msg, area);
         return;
     }
@@ -102,15 +102,15 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
         Style::default()
     };
     let title = if any_error {
-        " Pipeline ✗ "
+        "- Pipeline ✗ "
     } else {
-        " Pipeline "
+        "- Pipeline "
     };
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(Borders::TOP)
         .title(title)
-        .title_bottom(
-            ratatui::text::Line::from(format!(" {} ", detail_label)).alignment(Alignment::Right),
+        .title_top(
+            ratatui::text::Line::from(format!(" {} -", detail_label)).alignment(Alignment::Right),
         )
         .style(block_style);
     let inner = block.inner(area);
@@ -232,9 +232,8 @@ fn mode_for_stage(app: &App, stage_idx: usize) -> OutputMode {
 
 /// Render the output pager area.
 fn render_output(frame: &mut Frame, app: &mut App, area: Rect) {
-    const BORDER_SIZE: u16 = 2;
-    app.visible_output_lines = area.height.saturating_sub(BORDER_SIZE).max(1) as usize;
-    app.visible_output_width = area.width.saturating_sub(BORDER_SIZE).max(1) as usize;
+    app.visible_output_lines = area.height.saturating_sub(2).max(1) as usize;
+    app.visible_output_width = area.width.max(1) as usize;
 
     let exit_info = if !app.stage_outputs.is_empty() {
         let idx = app
@@ -279,9 +278,11 @@ fn render_output(frame: &mut Frame, app: &mut App, area: Rect) {
         String::new()
     };
 
-    let title = format!(" Output ({}) — {}{} ", mode_label, exit_info, search_info,);
+    let title = format!("- {} — {}{} ", mode_label, exit_info, search_info,);
 
-    let block = Block::default().borders(Borders::ALL).title(title);
+    let block = Block::default()
+        .borders(Borders::TOP | Borders::BOTTOM)
+        .title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
