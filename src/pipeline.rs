@@ -89,7 +89,7 @@ impl Pipeline {
         let mut subcmds: Vec<String> = vec![];
         for cmd in cmds {
             if cmd.trim() == "|" {
-                stages.push(PipeStage::new(subcmds.join(" ")));
+                stages.push(PipeStage::new(join_shell_args(&subcmds)));
                 subcmds.clear();
             } else if parse {
                 // Flush any accumulated subcmds before splitting
@@ -109,7 +109,7 @@ impl Pipeline {
             }
         }
         if !subcmds.is_empty() {
-            stages.push(PipeStage::new(subcmds.join(" ")));
+            stages.push(PipeStage::new(join_shell_args(&subcmds)));
         }
         Self::new(stages)
     }
@@ -119,6 +119,31 @@ impl Pipeline {
 #[allow(dead_code)]
 pub fn parse_pipeline(s: &str) -> Pipeline {
     return Pipeline::from_commands(vec![s.to_string()], true);
+}
+
+/// Shell-quote an argument if it contains characters that are special to the
+/// shell.  This restores the quoting that the shell strips when it hands
+/// individual words to the process via `argv`.
+fn shell_quote(arg: &str) -> String {
+    if !arg.is_empty()
+        && arg.bytes().all(|b| {
+            matches!(b,
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9'
+            | b'-' | b'_' | b'.' | b'/' | b':' | b'@' | b'+' | b',' | b'%' | b'=')
+        })
+    {
+        return arg.to_string();
+    }
+    // Wrap in single quotes; escape embedded single quotes.
+    let escaped = arg.replace('\'', "'\\''");
+    format!("'{escaped}'")
+}
+
+fn join_shell_args(args: &[String]) -> String {
+    args.iter()
+        .map(|a| shell_quote(a))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn split_pipeline_stages(s: &str) -> Vec<&str> {
