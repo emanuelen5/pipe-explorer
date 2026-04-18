@@ -63,6 +63,10 @@ impl Pipeline {
         }
     }
 
+    pub fn insert_before_selected(&mut self) {
+        self.stages.insert(self.selected, PipeStage::new(""));
+    }
+
     /// Insert a new empty stage after the currently selected stage.
     pub fn insert_after_selected(&mut self) {
         let pos = if self.stages.is_empty() {

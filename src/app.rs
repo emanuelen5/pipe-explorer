@@ -1016,6 +1016,19 @@ impl App {
                 }
             }
 
+            KeyCode::Char('O') => {
+                self.save_pipeline_state();
+                self.pipeline.insert_before_selected();
+                self.sync_stage_views();
+                self.start_editing();
+                if let AppMode::Editing {
+                    pending_new_stage, ..
+                } = &mut self.mode
+                {
+                    *pending_new_stage = true;
+                }
+            }
+
             // Search forward/back
             KeyCode::Char('n') => {
                 self.search_next();

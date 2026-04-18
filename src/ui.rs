@@ -435,9 +435,9 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             (
                 format!("NORMAL{}", running),
                 format!(
-                    "[q]uit  [e]edit  [o]new  [d/Del] [h/l/←/→]switch  \
+                    "[q]uit  [e]edit  [O]prepend  [o|]append  [d,Del] [hl←→]switch  \
                      [m]cycle output  [s]ave  [r]erun  \
-                     [/]search  [?/:h]help{}",
+                     [/]search  [?,:h]help{}",
                     search_nav_hint
                 ),
             )
@@ -709,7 +709,8 @@ fn render_help(frame: &mut Frame, area: Rect) {
         ListItem::new("→ / l          Next stage"),
         ListItem::new("← / h          Previous stage"),
         ListItem::new("e              Edit current stage command"),
-        ListItem::new("o / |          Add new stage"),
+        ListItem::new("O              Insert new stage before current"),
+        ListItem::new("o / |          Insert new stage after current"),
         ListItem::new("d / Delete     Delete current stage"),
         ListItem::new("u              Undo last pipeline change"),
         ListItem::new("Ctrl+R         Redo last undone change"),
