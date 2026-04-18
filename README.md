@@ -6,9 +6,9 @@
 - ⚡ Parse output from commands that are normally slow
 - 📂 No need for using temporary files
 
-### Example screenshot
+### Demo
 
-![Screenshot from when listing a simple pipeline: `gh api repos/emanuelen5/pipe-explorer/commits | jq -r '.[] | "\(.sha): \(.commit.author.date)"'` taking commits in JSON data from Github and parses out their respective SHAs and author dates](./docs/screenshot.png)
+![Video from when interactively creating a simple pipeline (`git ls-files | grep --color=always test | sort -t: | cut -d: -f1 | uniq -c`) that finds places where "test" is mentioned in a git repo and then filtering down on the number of hits in each file](./docs/demo.gif)
 
 ## Features
 
