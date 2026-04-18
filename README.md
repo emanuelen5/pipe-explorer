@@ -49,18 +49,31 @@ cargo build --release
 
 ## Usage
 
-Launch pipe-explorer with an optional starting pipeline (stages separated by ` | `):
+Launch pipe-explorer with an optional starting pipeline (stages must be separated by a _literal_ pipe character ` \| `):
 
 ```bash
 # Start new empty session
 pipe-explorer
 
 # Start with a pre-defined 2-stage pipeline
-pipe-explorer "find . -name '*.rs' | wc -l"
+pipe-explorer find . -name '*.rs' \| wc -l
 
 # Debug a more complex pipeline
-pipe-explorer "cat /var/log/syslog | grep ERROR | awk '{print \$5}' | sort | uniq -c | sort -rn"
+pipe-explorer cat /var/log/syslog \| grep ERROR \| awk '{print \$5}' \| sort \| uniq -c \| sort -rn
 ```
+
+If you have simpler commands, you can use the `--parse` option to automatically try to split up commands based on the location of the pipe characters:
+
+```bash
+# Same command as above, but note that we had to use " as outer quotation marks.
+# Single quotes would collide with the ones in the string.
+pipe-explorer --parse "find . -name '*.rs' | wc -l"
+```
+
+> [!WARNING]
+> YMMV, `--parse` _only_ works for "simple" commands where you don't have
+> complicated embedded strings nor ` | ` inside a string.
+> You kind of have to know what you're doing.
 
 ### Keybindings
 
