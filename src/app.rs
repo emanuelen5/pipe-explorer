@@ -16,7 +16,9 @@ use tokio::sync::mpsc;
 
 use crate::ansi::AnsiLineIndex;
 pub use crate::executor::OutputMode;
-use crate::executor::{ExecutorCache, StageOutput, StreamMsg, run_pipeline_streaming};
+use crate::executor::{
+    ExecutorCache, PreFillEntry, StageOutput, StreamMsg, run_pipeline_streaming,
+};
 use crate::pipeline::Pipeline;
 use crate::search::{SearchHistory, SearchState};
 use crate::ui::{self, trigger_terminal_bell};
@@ -171,6 +173,11 @@ struct ExecRequest {
     output_modes: Vec<OutputMode>,
     cancel: Arc<AtomicBool>,
     result_tx: std_mpsc::Sender<StreamMsg>,
+    /// Stage outputs accumulated during the previous (possibly still-running)
+    /// execution.  Injected into the executor cache before the new run so that
+    /// stages before the first modified stage are served from cache immediately
+    /// rather than being re-executed.
+    pre_fill: Vec<PreFillEntry>,
 }
 
 /// Full application state.
@@ -281,6 +288,7 @@ impl App {
             while let Some(req) = request_rx.recv().await {
                 let mut c = cache;
                 let (returned_cache,) = tokio::task::spawn_blocking(move || {
+                    c.inject_pre_fill(&req.pre_fill);
                     run_pipeline_streaming(
                         &mut c,
                         &req.commands,
@@ -326,10 +334,53 @@ impl App {
     /// Cancels any in-flight execution, creates a fresh result channel, and
     /// pre-fills `stage_outputs` with empty placeholders so incremental
     /// `StreamMsg::StageUpdate` messages can append data in-place.
+    ///
+    /// Before cancelling the previous execution, the accumulated outputs for
+    /// stages before the currently selected one are snapshotted and injected
+    /// into the executor cache as `PreFillEntry` values.  This ensures that
+    /// those stages are served from cache immediately on the next run rather
+    /// than being restarted — even if they were still streaming when the new
+    /// stage was inserted or the selected stage was edited.
     pub fn trigger_exec(&mut self, force: bool) {
         if self.pipeline.is_empty() {
             return;
         }
+
+        // Snapshot outputs for stages before `selected` so they can be
+        // injected into the executor cache.  This prevents those stages from
+        // being re-executed when a new stage is inserted after them or when
+        // the selected stage is edited.  We do this *before* cancelling the
+        // current execution so we capture whatever has been accumulated.
+        let pre_fill: Vec<PreFillEntry> = if !force && self.pipeline.selected > 0 {
+            let mut entries = Vec::new();
+            let mut prev_stdin: Vec<u8> = Vec::new();
+            for i in 0..self.pipeline.selected {
+                if i < self.stage_outputs.len() && i < self.pipeline.stages.len() {
+                    let cmd = self.pipeline.stages[i].command.clone();
+                    let out = self.stage_outputs[i].clone();
+                    entries.push(PreFillEntry {
+                        command: cmd,
+                        stdin: prev_stdin.clone(),
+                        output: out.clone(),
+                    });
+                    // `stage_views` is always kept in sync with `stages` via
+                    // `sync_stage_views()`, so index `i` is always valid here.
+                    // The fallback to `Stdout` is a safe default for any edge
+                    // case where the two vecs are temporarily out of sync.
+                    let mode = self
+                        .stage_views
+                        .get(i)
+                        .map(|v| v.output_mode)
+                        .unwrap_or(OutputMode::Stdout);
+                    prev_stdin = out.relay_bytes(mode);
+                } else {
+                    break;
+                }
+            }
+            entries
+        } else {
+            Vec::new()
+        };
 
         // Cancel any in-flight execution.
         self.cancel_token.store(true, Ordering::Relaxed);
@@ -372,6 +423,7 @@ impl App {
             output_modes,
             cancel,
             result_tx: sync_tx,
+            pre_fill,
         };
 
         // Send request to the long-lived background task (fire-and-forget).

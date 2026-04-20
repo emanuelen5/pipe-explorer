@@ -138,6 +138,30 @@ impl StageOutput {
         self.stderr_line_index.extend(&self.stderr_text);
     }
 
+    /// Return the bytes that would be relayed to the next pipeline stage as
+    /// stdin, given `mode`.  ANSI SGR sequences are stripped so that
+    /// downstream commands receive plain text.
+    ///
+    /// For `Combined` mode the bytes from `stdout` and `stderr` are
+    /// interleaved in arrival order (via the `combined` field) before
+    /// stripping.  The allocation is intentional and acceptable because
+    /// `relay_bytes` is only called once per pre-fill stage in `trigger_exec`,
+    /// which is bounded by the number of pipeline stages.
+    pub fn relay_bytes(&self, mode: OutputMode) -> Vec<u8> {
+        match mode {
+            OutputMode::Stdout => strip_ansi_sgr_bytes(&self.stdout),
+            OutputMode::Stderr => strip_ansi_sgr_bytes(&self.stderr),
+            OutputMode::Combined => {
+                let combined_bytes: Vec<u8> = self
+                    .combined
+                    .iter()
+                    .flat_map(|l| l.content.iter().copied())
+                    .collect();
+                strip_ansi_sgr_bytes(&combined_bytes)
+            }
+        }
+    }
+
     /// Get the pre-built line index for the given output mode.
     /// Returns `None` for Combined mode (no persistent index).
     pub fn line_index(&self, mode: OutputMode) -> Option<&AnsiLineIndex> {
@@ -244,6 +268,19 @@ fn append_text_incremental(text: &mut String, new_bytes: &[u8], full_buf: &[u8])
     }
 }
 
+/// A previously-accumulated stage output to inject into the executor cache
+/// before starting a new pipeline run.  By pre-filling the cache from the
+/// in-memory outputs that were collected during the previous (potentially
+/// still-running) execution, stages before a newly-inserted or edited stage
+/// can be served immediately from cache rather than being restarted.
+pub struct PreFillEntry {
+    pub command: String,
+    /// The raw stdin bytes that were fed into this stage (used to derive the
+    /// cache key).
+    pub stdin: Vec<u8>,
+    pub output: StageOutput,
+}
+
 /// Cache key: (command_string, sha256 of stdin bytes).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CacheKey {
@@ -298,6 +335,18 @@ impl ExecutorCache {
             stdin_hash: sha256(stdin),
         };
         self.cache.insert(key, output);
+    }
+
+    /// Inject a batch of pre-filled stage outputs into the cache.
+    ///
+    /// This is used when a new stage is inserted (or an existing one is
+    /// edited): the already-accumulated outputs for the unmodified stages
+    /// before it are injected so that the next pipeline run can serve them
+    /// from cache instead of re-executing those commands.
+    pub fn inject_pre_fill(&mut self, entries: &[PreFillEntry]) {
+        for entry in entries {
+            self.store(&entry.command, &entry.stdin, entry.output.clone());
+        }
     }
 }
 
