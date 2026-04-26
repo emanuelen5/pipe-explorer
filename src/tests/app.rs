@@ -1042,6 +1042,114 @@ async fn test_scroll_long_lines_followed_by_short() {
     assert_eq!(app.view().scroll, 3);
 }
 
+/// `compute_max_scroll` caches its result and returns the cached value on
+/// repeated calls when the inputs (line count, dimensions, mode, selected
+/// stage) are unchanged.  The cache must be invalidated when any input
+/// changes so the correct value is returned after the change.
+#[tokio::test]
+async fn test_compute_max_scroll_cache() {
+    let pipeline = parse_pipeline("echo a");
+    let mut app = App::new(pipeline);
+
+    app.stage_outputs = vec![make_stage_output("1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n")];
+    app.visible_output_lines = 3;
+    app.visible_output_width = 80;
+
+    // Cache is empty before the first call.
+    assert!(app.max_scroll_cache.is_none(), "cache should start empty");
+
+    let first = app.compute_max_scroll();
+    // Cache should be populated after the first call.
+    assert!(
+        app.max_scroll_cache.is_some(),
+        "cache should be populated after first call"
+    );
+
+    // Second call with identical inputs must return the same value (cache hit).
+    let second = app.compute_max_scroll();
+    assert_eq!(first, second, "repeated call should return the same value");
+
+    // Adding more output increases total_lines → cache miss → new value.
+    app.stage_outputs = vec![make_stage_output(
+        "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n15\n",
+    )];
+    let after_more_output = app.compute_max_scroll();
+    assert!(
+        after_more_output > first,
+        "more lines should yield a larger max_scroll"
+    );
+    // Cache key should now reflect the new total_lines.
+    assert_eq!(
+        app.max_scroll_cache.as_ref().unwrap().total_lines,
+        app.output_line_count(),
+        "cache key should reflect updated total_lines"
+    );
+
+    // Changing visible dimensions must also invalidate the cache.
+    app.visible_output_lines = 10;
+    let with_more_visible = app.compute_max_scroll();
+    assert!(
+        with_more_visible < after_more_output,
+        "taller viewport should reduce max_scroll"
+    );
+}
+
+/// When lines are appended at the end but the current viewport is entirely
+/// above the new content, `compute_max_scroll` should update the cached value
+/// in O(1) by adding the number of new lines — no backward walk needed.
+#[tokio::test]
+async fn test_compute_max_scroll_append_outside_viewport() {
+    let pipeline = parse_pipeline("echo a");
+    let mut app = App::new(pipeline);
+
+    // 10 lines, viewport shows 3 at a time, user is scrolled to the top.
+    app.stage_outputs = vec![make_stage_output("1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n")];
+    app.visible_output_lines = 3;
+    app.visible_output_width = 80;
+    // scroll = 0 (default), total = 11, scroll + visible = 3 ≤ 11 → viewport above new lines
+    let first = app.compute_max_scroll();
+    let first_total = app.output_line_count();
+
+    // Append 5 more lines (simulating streaming output).
+    app.stage_outputs = vec![make_stage_output(
+        "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n15\n",
+    )];
+    let second = app.compute_max_scroll();
+    let second_total = app.output_line_count();
+
+    let delta = second_total - first_total;
+    assert_eq!(
+        second,
+        first + delta,
+        "max_scroll should grow by the number of appended lines when viewport is above new content"
+    );
+
+    // The fast path must also work if the user is scrolled partway up but still
+    // entirely within old content.  With 16-line output (15 newlines + trailing
+    // empty = 16), visible=3, scroll + visible = 2 + 3 = 5 ≤ 11 (old total).
+    app.stage_outputs = vec![make_stage_output("1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n")];
+    app.visible_output_lines = 3;
+    let _ = app.compute_max_scroll(); // prime the cache with 11-line content
+    app.view_mut().scroll = 2; // scroll within old content
+
+    app.stage_outputs = vec![make_stage_output(
+        "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n15\n",
+    )];
+    let scrolled_result = app.compute_max_scroll();
+    let scrolled_total = app.output_line_count();
+    let cached_total = app.max_scroll_cache.as_ref().unwrap().total_lines;
+    assert_eq!(
+        cached_total, scrolled_total,
+        "cache total_lines should be updated to the new total"
+    );
+    // For non-wrapping lines the shortcut gives the correct result.
+    assert_eq!(
+        scrolled_result,
+        scrolled_total.saturating_sub(3),
+        "scrolled fast-path result should equal total - visible for non-wrapping lines"
+    );
+}
+
 // ---------------------------------------------------------------
 // Stage deletion tests
 // ---------------------------------------------------------------
