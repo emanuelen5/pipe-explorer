@@ -55,6 +55,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if app.show_help {
         render_help(frame, frame.area());
     }
+    if app.show_options {
+        render_options(frame, app, frame.area());
+    }
 }
 
 /// Build the pipe connector string based on a stage's output mode.
@@ -157,7 +160,8 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
             })
             .unwrap_or(0);
         let error_mark = if stage_error { "✗" } else { "" };
-        let count_label = format!("{}{}", line_count, error_mark);
+        let interactive_mark = if stage.interactive { "ⁱ" } else { "" };
+        let count_label = format!("{}{}{}", interactive_mark, line_count, error_mark);
 
         // The connector that follows this command (empty for the last stage).
         let connector = if i + 1 < n {
@@ -745,4 +749,38 @@ fn render_help(frame: &mut Frame, area: Rect) {
             .style(Style::default().bg(Color::DarkGray)),
     );
     frame.render_widget(list, help_area);
+}
+
+/// Render the per-stage options overlay.
+fn render_options(frame: &mut Frame, app: &App, area: Rect) {
+    let selected = app.pipeline.selected;
+    let interactive = app
+        .pipeline
+        .stages
+        .get(selected)
+        .map(|s| s.interactive)
+        .unwrap_or(false);
+    let interactive_label = if interactive {
+        "[i] Interactive shell:  ON"
+    } else {
+        "[i] Interactive shell:  OFF"
+    };
+
+    let items: Vec<ListItem> = vec![ListItem::new(interactive_label)];
+
+    let width = area.width.min(40);
+    let height = (items.len() as u16) + 2;
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let opts_area = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, opts_area);
+    let title = format!(" Stage {} options — Esc to close ", selected + 1);
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .style(Style::default().bg(Color::DarkGray)),
+    );
+    frame.render_widget(list, opts_area);
 }

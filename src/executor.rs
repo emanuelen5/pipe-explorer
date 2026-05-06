@@ -555,9 +555,27 @@ fn get_parent_shell() -> Option<String> {
 }
 
 /// Spawn a child process for the given shell command.
-fn spawn_shell(command: &str) -> anyhow::Result<std::process::Child> {
-    Ok(Command::new(get_shell())
-        .arg("-c")
+fn spawn_shell(command: &str, interactive: bool) -> anyhow::Result<std::process::Child> {
+    let mut cmd = Command::new(get_shell());
+    if interactive {
+        cmd.arg("-i");
+        // Put interactive shells in their own session so they cannot call
+        // tcsetpgrp() on the parent's controlling terminal.  Without this,
+        // `zsh -i` tries to grab the foreground process group, which
+        // suspends or kills pipe-explorer.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // SAFETY: setsid() is async-signal-safe (POSIX).
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::setsid();
+                    Ok(())
+                });
+            }
+        }
+    }
+    cmd.arg("-c")
         .arg(command)
         .env("TERM", "xterm-256color")
         .env("COLORTERM", "truecolor")
@@ -566,8 +584,8 @@ fn spawn_shell(command: &str) -> anyhow::Result<std::process::Child> {
         .env("FORCE_COLOR", "3")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?)
+        .stderr(Stdio::piped());
+    Ok(cmd.spawn()?)
 }
 
 /// Extract the output stream to relay to the next stage (with ANSI stripping).
@@ -606,6 +624,7 @@ pub fn run_pipeline_streaming(
     up_to: usize,
     force: bool,
     output_modes: &[OutputMode],
+    interactive_flags: &[bool],
     cancel: &Arc<AtomicBool>,
     ui_tx: &std_mpsc::Sender<StreamMsg>,
 ) {
@@ -701,7 +720,8 @@ pub fn run_pipeline_streaming(
             return;
         }
 
-        let mut child = match spawn_shell(&commands[i]) {
+        let stage_interactive = interactive_flags.get(i).copied().unwrap_or(false);
+        let mut child = match spawn_shell(&commands[i], stage_interactive) {
             Ok(c) => c,
             Err(e) => {
                 for ls in live.iter_mut().flatten() {

@@ -6,6 +6,9 @@ pub struct PipeStage {
     /// Timestamp of the most recent data chunk received from the executor.
     /// Used by the renderer to highlight the stage/pipe while data is actively flowing.
     pub last_update: Option<std::time::Instant>,
+    /// When `true`, the shell is invoked with `-i` (interactive mode) so that
+    /// builtins like `history` work and rc files are sourced.
+    pub interactive: bool,
 }
 
 impl PipeStage {
@@ -13,6 +16,7 @@ impl PipeStage {
         Self {
             command: command.into(),
             last_update: None,
+            interactive: false,
         }
     }
 }

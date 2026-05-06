@@ -128,14 +128,12 @@ impl EditorState {
                 }
             }
             KeyCode::Home | KeyCode::Char('a')
-                if key.code == KeyCode::Home
-                    || key.modifiers.contains(KeyModifiers::CONTROL) =>
+                if key.code == KeyCode::Home || key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 self.cursor = 0;
             }
             KeyCode::End | KeyCode::Char('e')
-                if key.code == KeyCode::End
-                    || key.modifiers.contains(KeyModifiers::CONTROL) =>
+                if key.code == KeyCode::End || key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 self.cursor = self.content.len();
             }
@@ -169,6 +167,7 @@ struct ExecRequest {
     up_to: usize,
     force: bool,
     output_modes: Vec<OutputMode>,
+    interactive_flags: Vec<bool>,
     cancel: Arc<AtomicBool>,
     result_tx: std_mpsc::Sender<StreamMsg>,
 }
@@ -188,6 +187,8 @@ pub struct App {
     pub running: bool,
     /// Show help overlay?
     pub show_help: bool,
+    /// Show options overlay for the selected stage?
+    pub show_options: bool,
     /// Cancellation token shared with the current execution.
     cancel_token: Arc<AtomicBool>,
     /// Sender for triggering background execution.
@@ -287,6 +288,7 @@ impl App {
                         req.up_to,
                         req.force,
                         &req.output_modes,
+                        &req.interactive_flags,
                         &req.cancel,
                         &req.result_tx,
                     );
@@ -309,6 +311,7 @@ impl App {
             error_message: None,
             running: false,
             show_help: false,
+            show_options: false,
             cancel_token: Arc::new(AtomicBool::new(false)),
             exec_tx,
             exec_rx,
@@ -361,6 +364,8 @@ impl App {
         let up_to = self.pipeline.selected;
         let output_modes: Vec<OutputMode> =
             self.stage_views.iter().map(|v| v.output_mode).collect();
+        let interactive_flags: Vec<bool> =
+            self.pipeline.stages.iter().map(|s| s.interactive).collect();
 
         // Create the sync channel for the executor.
         let (sync_tx, sync_rx) = std_mpsc::channel::<StreamMsg>();
@@ -370,6 +375,7 @@ impl App {
             up_to,
             force,
             output_modes,
+            interactive_flags,
             cancel,
             result_tx: sync_tx,
         };
@@ -478,6 +484,16 @@ impl App {
         }
 
         self.compute_search_matches();
+    }
+
+    /// Toggle the interactive shell flag on the currently selected stage and re-execute.
+    pub fn toggle_interactive(&mut self) {
+        if self.pipeline.is_empty() {
+            return;
+        }
+        let idx = self.pipeline.selected;
+        self.pipeline.stages[idx].interactive = !self.pipeline.stages[idx].interactive;
+        self.trigger_exec(true);
     }
 
     /// Handle a streaming message from the background executor.
@@ -1002,6 +1018,11 @@ impl App {
                 }
             }
 
+            // Stage options (Ctrl+O)
+            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.show_options = true;
+            }
+
             // Add new stage
             KeyCode::Char('o') | KeyCode::Char('|') => {
                 self.save_pipeline_state();
@@ -1287,7 +1308,7 @@ impl App {
     }
 
     /// Known commands supported in command mode.
-    const KNOWN_COMMANDS: &'static [&'static str] = &["help", "quit"];
+    const KNOWN_COMMANDS: &'static [&'static str] = &["help", "interactive", "options", "quit"];
 
     /// Handle a key event while in command mode (`:` prompt).
     fn handle_command_key(&mut self, key: KeyEvent) -> bool {
@@ -1308,6 +1329,10 @@ impl App {
                     self.show_help = true;
                 } else if cmd == "q" || cmd == "quit" {
                     return true;
+                } else if cmd == "i" || cmd == "interactive" {
+                    self.toggle_interactive();
+                } else if cmd == "o" || cmd == "options" || cmd == "opt" {
+                    self.show_options = true;
                 }
             }
             KeyCode::Tab => {
@@ -1375,6 +1400,22 @@ impl App {
         // Close help on any key
         if self.show_help {
             self.show_help = false;
+            return false;
+        }
+
+        // Options overlay: handle keys within the overlay
+        if self.show_options {
+            if let Event::Key(key) = event {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        self.show_options = false;
+                    }
+                    KeyCode::Char('i') => {
+                        self.toggle_interactive();
+                    }
+                    _ => {}
+                }
+            }
             return false;
         }
 
@@ -1481,11 +1522,34 @@ async fn run_inner(
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     crossterm::terminal::enable_raw_mode()?;
+    // Disable VDISCARD (Ctrl+O) in the TTY driver so it reaches the app as a
+    // normal keypress instead of toggling output flushing.
+    #[cfg(unix)]
+    disable_vdiscard();
     let mut stdout = io::stdout();
     crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
+}
+
+/// Disable the VDISCARD special character so Ctrl+O is delivered as input.
+///
+/// crossterm's raw mode does not clear VDISCARD, so the TTY driver may still
+/// intercept Ctrl+O (ASCII 0x0F).  Setting it to `_POSIX_VDISABLE` (0)
+/// prevents this.  The original value is restored when raw mode is disabled
+/// because crossterm saves and restores the full termios struct.
+#[cfg(unix)]
+fn disable_vdiscard() {
+    use std::os::unix::io::AsRawFd;
+    let fd = std::io::stdin().as_raw_fd();
+    unsafe {
+        let mut termios: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(fd, &mut termios) == 0 {
+            termios.c_cc[libc::VDISCARD] = 0;
+            libc::tcsetattr(fd, libc::TCSANOW, &termios);
+        }
+    }
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
