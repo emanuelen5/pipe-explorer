@@ -10,7 +10,7 @@ use ratatui::{
 use std::io::Write;
 
 use crate::ansi::ansi_text_to_visible_lines;
-use crate::app::{App, AppMode, OutputMode};
+use crate::app::{App, AppMode, OptionsTab, OutputMode};
 
 /// Maximum width (columns) of the command editor overlay dialog.
 pub const EDITOR_DIALOG_MAX_WIDTH: u16 = 120;
@@ -160,7 +160,8 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
             })
             .unwrap_or(0);
         let error_mark = if stage_error { "✗" } else { "" };
-        let interactive_mark = if stage.interactive { "ⁱ" } else { "" };
+        let effective_interactive = stage.interactive.unwrap_or(app.global_defaults.interactive);
+        let interactive_mark = if effective_interactive { "ⁱ" } else { "" };
         let count_label = format!("{}{}{}", interactive_mark, line_count, error_mark);
 
         // The connector that follows this command (empty for the last stage).
@@ -754,32 +755,101 @@ fn render_help(frame: &mut Frame, area: Rect) {
 /// Render the per-stage options overlay.
 fn render_options(frame: &mut Frame, app: &App, area: Rect) {
     let selected = app.pipeline.selected;
-    let interactive = app
-        .pipeline
-        .stages
-        .get(selected)
-        .map(|s| s.interactive)
-        .unwrap_or(false);
-    let interactive_label = if interactive {
-        "[i] Interactive shell:  ON"
+    let width = area.width.min(50);
+
+    // --- Build tab header ---
+    let stage_tab_style = if app.options_tab == OptionsTab::Stage {
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
     } else {
-        "[i] Interactive shell:  OFF"
+        Style::default().fg(Color::DarkGray)
+    };
+    let global_tab_style = if app.options_tab == OptionsTab::Global {
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let tab_line = Line::from(vec![
+        Span::styled(format!(" Stage {} ", selected + 1), stage_tab_style),
+        Span::raw("│"),
+        Span::styled(" Global ", global_tab_style),
+    ]);
+
+    // --- Build body items ---
+    let items: Vec<ListItem> = match app.options_tab {
+        OptionsTab::Stage => {
+            let stage = &app.pipeline.stages[selected];
+            let interactive_label = match stage.interactive {
+                Some(true) => "[i] Interactive shell:  ON  (stage override)",
+                Some(false) => "[i] Interactive shell:  OFF (stage override)",
+                None => {
+                    if app.global_defaults.interactive {
+                        "[i] Interactive shell:  ON  (inherited)"
+                    } else {
+                        "[i] Interactive shell:  OFF (inherited)"
+                    }
+                }
+            };
+            let shell_label = match &stage.shell {
+                Some(s) => format!("[s] Shell: {}  (stage override)", s),
+                None => match &app.global_defaults.shell {
+                    Some(s) => format!("[s] Shell: {}  (inherited)", s),
+                    None => "[s] Shell: auto-detect  (inherited)".to_string(),
+                },
+            };
+            let reset_hint = if stage.interactive.is_some() || stage.shell.is_some() {
+                "[r] Reset overrides to inherited"
+            } else {
+                ""
+            };
+            let mut items = vec![
+                ListItem::new(tab_line),
+                ListItem::new(interactive_label),
+                ListItem::new(shell_label),
+            ];
+            if !reset_hint.is_empty() {
+                items.push(ListItem::new(reset_hint));
+            }
+            if let Some(ref editor) = app.options_shell_editor {
+                items.push(ListItem::new(format!("  > {}", editor.content)));
+            }
+            items
+        }
+        OptionsTab::Global => {
+            let interactive_label = if app.global_defaults.interactive {
+                "[i] Interactive shell:  ON"
+            } else {
+                "[i] Interactive shell:  OFF"
+            };
+            let shell_label = match &app.global_defaults.shell {
+                Some(s) => format!("[s] Shell: {}", s),
+                None => "[s] Shell: auto-detect".to_string(),
+            };
+            let mut items = vec![
+                ListItem::new(tab_line),
+                ListItem::new(interactive_label),
+                ListItem::new(shell_label),
+            ];
+            if let Some(ref editor) = app.options_shell_editor {
+                items.push(ListItem::new(format!("  > {}", editor.content)));
+            }
+            items
+        }
     };
 
-    let items: Vec<ListItem> = vec![ListItem::new(interactive_label)];
-
-    let width = area.width.min(40);
     let height = (items.len() as u16) + 2;
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     let opts_area = Rect::new(x, y, width, height);
 
     frame.render_widget(Clear, opts_area);
-    let title = format!(" Stage {} options — Esc to close ", selected + 1);
     let list = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(title)
+            .title(" Options — Tab to switch, Esc to close ")
             .style(Style::default().bg(Color::DarkGray)),
     );
     frame.render_widget(list, opts_area);

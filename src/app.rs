@@ -168,8 +168,34 @@ struct ExecRequest {
     force: bool,
     output_modes: Vec<OutputMode>,
     interactive_flags: Vec<bool>,
+    shells: Vec<Option<String>>,
     cancel: Arc<AtomicBool>,
     result_tx: std_mpsc::Sender<StreamMsg>,
+}
+
+/// Global default settings that stages inherit unless overridden.
+#[derive(Debug, Clone)]
+pub struct GlobalDefaults {
+    /// Default interactive shell flag for all stages.
+    pub interactive: bool,
+    /// Default shell executable. `None` means auto-detect (parent shell / $SHELL / sh).
+    pub shell: Option<String>,
+}
+
+impl Default for GlobalDefaults {
+    fn default() -> Self {
+        Self {
+            interactive: false,
+            shell: None,
+        }
+    }
+}
+
+/// Which tab is active in the options overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionsTab {
+    Global,
+    Stage,
 }
 
 /// Full application state.
@@ -189,6 +215,12 @@ pub struct App {
     pub show_help: bool,
     /// Show options overlay for the selected stage?
     pub show_options: bool,
+    /// Which tab is active in the options overlay.
+    pub options_tab: OptionsTab,
+    /// Inline editor for the shell field in the options overlay.
+    pub options_shell_editor: Option<EditorState>,
+    /// Global default settings inherited by stages.
+    pub global_defaults: GlobalDefaults,
     /// Cancellation token shared with the current execution.
     cancel_token: Arc<AtomicBool>,
     /// Sender for triggering background execution.
@@ -289,6 +321,7 @@ impl App {
                         req.force,
                         &req.output_modes,
                         &req.interactive_flags,
+                        &req.shells,
                         &req.cancel,
                         &req.result_tx,
                     );
@@ -312,6 +345,9 @@ impl App {
             running: false,
             show_help: false,
             show_options: false,
+            options_tab: OptionsTab::Stage,
+            options_shell_editor: None,
+            global_defaults: GlobalDefaults::default(),
             cancel_token: Arc::new(AtomicBool::new(false)),
             exec_tx,
             exec_rx,
@@ -364,8 +400,22 @@ impl App {
         let up_to = self.pipeline.selected;
         let output_modes: Vec<OutputMode> =
             self.stage_views.iter().map(|v| v.output_mode).collect();
-        let interactive_flags: Vec<bool> =
-            self.pipeline.stages.iter().map(|s| s.interactive).collect();
+        let interactive_flags: Vec<bool> = self
+            .pipeline
+            .stages
+            .iter()
+            .map(|s| s.interactive.unwrap_or(self.global_defaults.interactive))
+            .collect();
+        let shells: Vec<Option<String>> = self
+            .pipeline
+            .stages
+            .iter()
+            .map(|s| {
+                s.shell
+                    .clone()
+                    .or_else(|| self.global_defaults.shell.clone())
+            })
+            .collect();
 
         // Create the sync channel for the executor.
         let (sync_tx, sync_rx) = std_mpsc::channel::<StreamMsg>();
@@ -376,6 +426,7 @@ impl App {
             force,
             output_modes,
             interactive_flags,
+            shells,
             cancel,
             result_tx: sync_tx,
         };
@@ -487,13 +538,27 @@ impl App {
     }
 
     /// Toggle the interactive shell flag on the currently selected stage and re-execute.
+    /// If the stage has no override, sets it to the opposite of the global default.
+    /// If it already has an override, flips it.
     pub fn toggle_interactive(&mut self) {
         if self.pipeline.is_empty() {
             return;
         }
         let idx = self.pipeline.selected;
-        self.pipeline.stages[idx].interactive = !self.pipeline.stages[idx].interactive;
+        let stage = &mut self.pipeline.stages[idx];
+        let effective = stage
+            .interactive
+            .unwrap_or(self.global_defaults.interactive);
+        stage.interactive = Some(!effective);
         self.trigger_exec(true);
+    }
+
+    /// Toggle the global default interactive flag and re-execute.
+    pub fn toggle_global_interactive(&mut self) {
+        self.global_defaults.interactive = !self.global_defaults.interactive;
+        if !self.pipeline.is_empty() {
+            self.trigger_exec(true);
+        }
     }
 
     /// Handle a streaming message from the background executor.
@@ -1406,12 +1471,84 @@ impl App {
         // Options overlay: handle keys within the overlay
         if self.show_options {
             if let Event::Key(key) = event {
+                // If the shell editor is active, route keys there first
+                if self.options_shell_editor.is_some() {
+                    match key.code {
+                        KeyCode::Esc => {
+                            self.options_shell_editor = None;
+                        }
+                        KeyCode::Enter => {
+                            let shell_val = self
+                                .options_shell_editor
+                                .as_ref()
+                                .map(|e| e.content.trim().to_string())
+                                .unwrap_or_default();
+                            self.options_shell_editor = None;
+                            let shell = if shell_val.is_empty() {
+                                None
+                            } else {
+                                Some(shell_val)
+                            };
+                            match self.options_tab {
+                                OptionsTab::Stage => {
+                                    if !self.pipeline.is_empty() {
+                                        let idx = self.pipeline.selected;
+                                        self.pipeline.stages[idx].shell = shell;
+                                    }
+                                }
+                                OptionsTab::Global => {
+                                    self.global_defaults.shell = shell;
+                                }
+                            }
+                            self.trigger_exec(true);
+                        }
+                        _ => {
+                            if let Some(ref mut editor) = self.options_shell_editor {
+                                editor.handle_key(key);
+                            }
+                        }
+                    }
+                    return false;
+                }
+
                 match key.code {
                     KeyCode::Esc | KeyCode::Char('q') => {
                         self.show_options = false;
                     }
-                    KeyCode::Char('i') => {
-                        self.toggle_interactive();
+                    KeyCode::Tab
+                    | KeyCode::Left
+                    | KeyCode::Right
+                    | KeyCode::Char('h')
+                    | KeyCode::Char('l') => {
+                        self.options_tab = match self.options_tab {
+                            OptionsTab::Stage => OptionsTab::Global,
+                            OptionsTab::Global => OptionsTab::Stage,
+                        };
+                    }
+                    KeyCode::Char('i') => match self.options_tab {
+                        OptionsTab::Stage => self.toggle_interactive(),
+                        OptionsTab::Global => self.toggle_global_interactive(),
+                    },
+                    KeyCode::Char('s') => {
+                        // Start editing the shell field
+                        let current = match self.options_tab {
+                            OptionsTab::Stage => {
+                                let idx = self.pipeline.selected;
+                                self.pipeline.stages.get(idx).and_then(|s| s.shell.clone())
+                            }
+                            OptionsTab::Global => self.global_defaults.shell.clone(),
+                        };
+                        self.options_shell_editor =
+                            Some(EditorState::new(current.unwrap_or_default()));
+                    }
+                    KeyCode::Char('r') if self.options_tab == OptionsTab::Stage => {
+                        // Reset stage overrides to inherited
+                        if !self.pipeline.is_empty() {
+                            let idx = self.pipeline.selected;
+                            self.pipeline.stages[idx].interactive = None;
+                            self.pipeline.stages[idx].shell = None;
+                            self.trigger_exec(true);
+                        }
                     }
                     _ => {}
                 }

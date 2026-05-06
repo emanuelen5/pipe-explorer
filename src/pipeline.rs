@@ -8,7 +8,11 @@ pub struct PipeStage {
     pub last_update: Option<std::time::Instant>,
     /// When `true`, the shell is invoked with `-i` (interactive mode) so that
     /// builtins like `history` work and rc files are sourced.
-    pub interactive: bool,
+    /// `None` means "use the global default".
+    pub interactive: Option<bool>,
+    /// Override the shell executable for this stage.
+    /// `None` means "use the global default".
+    pub shell: Option<String>,
 }
 
 impl PipeStage {
@@ -16,7 +20,8 @@ impl PipeStage {
         Self {
             command: command.into(),
             last_update: None,
-            interactive: false,
+            interactive: None,
+            shell: None,
         }
     }
 }

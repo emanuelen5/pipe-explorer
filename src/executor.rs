@@ -555,8 +555,14 @@ fn get_parent_shell() -> Option<String> {
 }
 
 /// Spawn a child process for the given shell command.
-fn spawn_shell(command: &str, interactive: bool) -> anyhow::Result<std::process::Child> {
-    let mut cmd = Command::new(get_shell());
+fn spawn_shell(
+    command: &str,
+    interactive: bool,
+    shell: Option<&str>,
+) -> anyhow::Result<std::process::Child> {
+    let default_shell = get_shell();
+    let shell_exe = shell.unwrap_or(&default_shell);
+    let mut cmd = Command::new(shell_exe);
     if interactive {
         cmd.arg("-i");
         // Put interactive shells in their own session so they cannot call
@@ -625,6 +631,7 @@ pub fn run_pipeline_streaming(
     force: bool,
     output_modes: &[OutputMode],
     interactive_flags: &[bool],
+    shells: &[Option<String>],
     cancel: &Arc<AtomicBool>,
     ui_tx: &std_mpsc::Sender<StreamMsg>,
 ) {
@@ -721,7 +728,8 @@ pub fn run_pipeline_streaming(
         }
 
         let stage_interactive = interactive_flags.get(i).copied().unwrap_or(false);
-        let mut child = match spawn_shell(&commands[i], stage_interactive) {
+        let stage_shell = shells.get(i).and_then(|s| s.as_deref());
+        let mut child = match spawn_shell(&commands[i], stage_interactive, stage_shell) {
             Ok(c) => c,
             Err(e) => {
                 for ls in live.iter_mut().flatten() {
