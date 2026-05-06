@@ -10,7 +10,7 @@ use ratatui::{
 use std::io::Write;
 
 use crate::ansi::ansi_text_to_visible_lines;
-use crate::app::{App, AppMode, OptionsTab, OutputMode};
+use crate::app::{App, AppMode, EditorState, OptionsTab, OutputMode};
 
 /// Maximum width (columns) of the command editor overlay dialog.
 pub const EDITOR_DIALOG_MAX_WIDTH: u16 = 120;
@@ -572,35 +572,34 @@ fn render_command_bar(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// Render the inline command editor overlay.
-fn render_editor_overlay(frame: &mut Frame, app: &App, area: Rect) {
-    let editor = match &app.mode {
-        AppMode::Editing { editor, .. } => editor,
-        _ => return,
-    };
-
+/// Render a generic editor dialog popup: a bordered box with a title and the
+/// editor content displayed with a visible cursor.
+fn render_editor_dialog(
+    frame: &mut Frame,
+    editor: &EditorState,
+    title: &str,
+    max_width: u16,
+    area: Rect,
+) {
     let height = 3u16;
-    let width = area.width.saturating_sub(4).min(EDITOR_DIALOG_MAX_WIDTH);
+    let width = area.width.saturating_sub(4).min(max_width);
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     let dialog_area = Rect::new(x, y, width, height);
 
     frame.render_widget(Clear, dialog_area);
-    let stage_num = app.pipeline.selected + 1;
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(format!(" Edit Stage {} Command ", stage_num))
+        .title(format!(" {} ", title))
         .style(Style::default().bg(Color::DarkGray));
 
     let cursor_pos = editor.cursor;
     let content = &editor.content;
-    // Build spans showing the cursor position
     let display = if cursor_pos < content.len() {
         let (before, after) = content.split_at(cursor_pos);
         let mut chars = after.chars();
         let cur_ch = chars.next().unwrap_or(' ');
         let rest: String = chars.collect();
-        // Build spans
         vec![
             Span::raw(before.to_string()),
             Span::styled(
@@ -623,52 +622,35 @@ fn render_editor_overlay(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(para, dialog_area);
 }
 
+/// Render the inline command editor overlay.
+fn render_editor_overlay(frame: &mut Frame, app: &App, area: Rect) {
+    let editor = match &app.mode {
+        AppMode::Editing { editor, .. } => editor,
+        _ => return,
+    };
+    let stage_num = app.pipeline.selected + 1;
+    render_editor_dialog(
+        frame,
+        editor,
+        &format!("Edit Stage {} Command", stage_num),
+        EDITOR_DIALOG_MAX_WIDTH,
+        area,
+    );
+}
+
 /// Render the save-to-file dialog overlay.
 fn render_save_overlay(frame: &mut Frame, app: &App, area: Rect) {
     let editor = match &app.mode {
         AppMode::Saving(editor) => editor,
         _ => return,
     };
-
-    let height = 3u16;
-    let width = area.width.saturating_sub(4).min(60);
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let dialog_area = Rect::new(x, y, width, height);
-
-    frame.render_widget(Clear, dialog_area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Save Output To File ")
-        .style(Style::default().bg(Color::DarkGray));
-
-    let cursor_pos = editor.cursor;
-    let content = &editor.content;
-    let display = if cursor_pos < content.len() {
-        let (before, after) = content.split_at(cursor_pos);
-        let mut chars = after.chars();
-        let cur_ch = chars.next().unwrap_or(' ');
-        let rest: String = chars.collect();
-        vec![
-            Span::raw(before.to_string()),
-            Span::styled(
-                cur_ch.to_string(),
-                Style::default().fg(Color::Black).bg(Color::White),
-            ),
-            Span::raw(rest),
-        ]
-    } else {
-        vec![
-            Span::raw(content.clone()),
-            Span::styled(" ", Style::default().fg(Color::Black).bg(Color::White)),
-        ]
-    };
-
-    let scroll_x = editor.scroll_x.min(u16::MAX as usize) as u16;
-    let para = Paragraph::new(Line::from(display))
-        .block(block)
-        .scroll((0, scroll_x));
-    frame.render_widget(para, dialog_area);
+    render_editor_dialog(
+        frame,
+        editor,
+        "Save Output To File",
+        SAVE_DIALOG_MAX_WIDTH,
+        area,
+    );
 }
 
 /// Render the delete confirmation overlay.
@@ -813,9 +795,6 @@ fn render_options(frame: &mut Frame, app: &App, area: Rect) {
             if !reset_hint.is_empty() {
                 items.push(ListItem::new(reset_hint));
             }
-            if let Some(ref editor) = app.options_shell_editor {
-                items.push(ListItem::new(format!("  > {}", editor.content)));
-            }
             items
         }
         OptionsTab::Global => {
@@ -828,14 +807,11 @@ fn render_options(frame: &mut Frame, app: &App, area: Rect) {
                 Some(s) => format!("[s] Shell: {}", s),
                 None => "[s] Shell: auto-detect".to_string(),
             };
-            let mut items = vec![
+            let items = vec![
                 ListItem::new(tab_line),
                 ListItem::new(interactive_label),
                 ListItem::new(shell_label),
             ];
-            if let Some(ref editor) = app.options_shell_editor {
-                items.push(ListItem::new(format!("  > {}", editor.content)));
-            }
             items
         }
     };
@@ -853,4 +829,13 @@ fn render_options(frame: &mut Frame, app: &App, area: Rect) {
             .style(Style::default().bg(Color::DarkGray)),
     );
     frame.render_widget(list, opts_area);
+
+    // Render the shell editor popup on top of the options overlay.
+    if let Some(ref editor) = app.options_shell_editor {
+        let title = match app.options_tab {
+            OptionsTab::Stage => format!("Stage {} Shell", selected + 1),
+            OptionsTab::Global => "Global Shell".to_string(),
+        };
+        render_editor_dialog(frame, editor, &title, EDITOR_DIALOG_MAX_WIDTH, area);
+    }
 }

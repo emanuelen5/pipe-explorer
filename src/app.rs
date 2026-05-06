@@ -39,6 +39,21 @@ impl Default for StageViewState {
     }
 }
 
+/// Result of [`EditorState::handle_key`].
+///
+/// Common editing keys (movement, insertion, deletion) are handled internally
+/// and return [`Handled`](EditorKeyResult::Handled).  Action keys that depend
+/// on the context (Enter, Esc, Tab, …) are returned as
+/// [`Unhandled`](EditorKeyResult::Unhandled) so that each call-site can
+/// provide its own behaviour — following the Dependency Inversion Principle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorKeyResult {
+    /// The key was consumed by the editor (text was modified or cursor moved).
+    Handled,
+    /// The key was **not** consumed — the caller should handle it.
+    Unhandled,
+}
+
 /// Inline text-editor state (used for command editing and save-to-file dialogs).
 #[derive(Debug, Clone)]
 pub struct EditorState {
@@ -80,8 +95,17 @@ impl EditorState {
     }
 
     /// Handle a key event that mutates the editor buffer (movement, insertion, deletion).
-    pub fn handle_key(&mut self, key: KeyEvent) {
+    ///
+    /// Returns [`EditorKeyResult::Handled`] when the key was consumed (text
+    /// editing or cursor movement).  Returns [`EditorKeyResult::Unhandled`]
+    /// for action keys (Enter, Esc, Tab, etc.) that should be handled by
+    /// the caller's context-specific logic.
+    pub fn handle_key(&mut self, key: KeyEvent) -> EditorKeyResult {
         match key.code {
+            // --- Action keys: delegate to caller ---
+            KeyCode::Enter | KeyCode::Esc | KeyCode::Tab => EditorKeyResult::Unhandled,
+
+            // --- Common editing keys ---
             KeyCode::Backspace => {
                 if self.cursor > 0 {
                     // Find previous char boundary (handles multi-byte characters)
@@ -93,28 +117,33 @@ impl EditorState {
                     self.content.remove(prev);
                     self.cursor = prev;
                 }
+                EditorKeyResult::Handled
             }
             KeyCode::Delete => {
                 if self.cursor < self.content.len() {
                     self.content.remove(self.cursor);
                 }
+                EditorKeyResult::Handled
             }
             KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 let new_cursor = word_left_pos(&self.content[..self.cursor]);
                 debug_assert!(self.content.is_char_boundary(new_cursor));
                 self.cursor = new_cursor;
+                EditorKeyResult::Handled
             }
             KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 let delta = word_right_pos(&self.content[self.cursor..]);
                 let new_cursor = self.cursor + delta;
                 debug_assert!(self.content.is_char_boundary(new_cursor));
                 self.cursor = new_cursor;
+                EditorKeyResult::Handled
             }
             KeyCode::Left => {
                 if self.cursor > 0 {
                     let s = &self.content[..self.cursor];
                     self.cursor = s.char_indices().last().map(|(i, _)| i).unwrap_or(0);
                 }
+                EditorKeyResult::Handled
             }
             KeyCode::Right => {
                 if self.cursor < self.content.len() {
@@ -126,22 +155,26 @@ impl EditorState {
                         .unwrap_or(self.content.len());
                     self.cursor = next;
                 }
+                EditorKeyResult::Handled
             }
             KeyCode::Home | KeyCode::Char('a')
                 if key.code == KeyCode::Home || key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 self.cursor = 0;
+                EditorKeyResult::Handled
             }
             KeyCode::End | KeyCode::Char('e')
                 if key.code == KeyCode::End || key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 self.cursor = self.content.len();
+                EditorKeyResult::Handled
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.content.insert(self.cursor, c);
                 self.cursor += c.len_utf8();
+                EditorKeyResult::Handled
             }
-            _ => {}
+            _ => EditorKeyResult::Unhandled,
         }
     }
 }
@@ -1214,6 +1247,13 @@ impl App {
 
     /// Handle a key event in the inline editor.
     fn handle_editor_key(&mut self, key: KeyEvent) -> bool {
+        // Let the editor try common editing keys first.
+        if let Some(editor) = self.editor_mut() {
+            if editor.handle_key(key) == EditorKeyResult::Handled {
+                return false;
+            }
+        }
+        // Action keys not consumed by the editor.
         match key.code {
             KeyCode::Esc => self.cancel_edit(),
             KeyCode::Tab => self.update_edit(),
@@ -1224,11 +1264,7 @@ impl App {
                     self.confirm_save();
                 }
             }
-            _ => {
-                if let Some(editor) = self.editor_mut() {
-                    editor.handle_key(key);
-                }
-            }
+            _ => {}
         }
         false
     }
@@ -1352,6 +1388,19 @@ impl App {
         };
 
         self.command_completions = None;
+
+        // Special case: Backspace on empty content exits command mode.
+        if editor.content.is_empty() && key.code == KeyCode::Backspace {
+            self.mode = AppMode::Normal;
+            return false;
+        }
+
+        // Let the editor try common editing keys first.
+        if editor.handle_key(key) == EditorKeyResult::Handled {
+            return false;
+        }
+
+        // Action keys not consumed by the editor.
         match key.code {
             KeyCode::Esc => {
                 self.mode = AppMode::Normal;
@@ -1372,6 +1421,9 @@ impl App {
             }
             KeyCode::Tab => {
                 // Tab-complete the current content against known commands.
+                let AppMode::Command(ref mut editor) = self.mode else {
+                    return false;
+                };
                 let matches: Vec<&str> = Self::KNOWN_COMMANDS
                     .iter()
                     .filter(|&&cmd| cmd.starts_with(editor.content.as_str()))
@@ -1405,13 +1457,7 @@ impl App {
                     }
                 }
             }
-            _ => {
-                if editor.content.is_empty() && key.code == KeyCode::Backspace {
-                    self.mode = AppMode::Normal;
-                } else {
-                    editor.handle_key(key);
-                }
-            }
+            _ => {}
         }
         false
     }
@@ -1443,6 +1489,13 @@ impl App {
             if let Event::Key(key) = event {
                 // If the shell editor is active, route keys there first
                 if self.options_shell_editor.is_some() {
+                    // Let the editor try common editing keys first.
+                    if let Some(ref mut editor) = self.options_shell_editor {
+                        if editor.handle_key(key) == EditorKeyResult::Handled {
+                            return false;
+                        }
+                    }
+                    // Action keys not consumed by the editor.
                     match key.code {
                         KeyCode::Esc => {
                             self.options_shell_editor = None;
@@ -1472,11 +1525,7 @@ impl App {
                             }
                             self.trigger_exec(true);
                         }
-                        _ => {
-                            if let Some(ref mut editor) = self.options_shell_editor {
-                                editor.handle_key(key);
-                            }
-                        }
+                        _ => {}
                     }
                     return false;
                 }
