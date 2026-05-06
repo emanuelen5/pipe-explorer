@@ -10,6 +10,8 @@ use sha2::{Digest, Sha256};
 
 use crate::ansi::{AnsiLineIndex, strip_ansi_sgr_bytes};
 
+use crate::pipeline::StageOptions;
+
 /// The display / pipe mode for stage output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputMode {
@@ -555,15 +557,11 @@ fn get_parent_shell() -> Option<String> {
 }
 
 /// Spawn a child process for the given shell command.
-fn spawn_shell(
-    command: &str,
-    interactive: bool,
-    shell: Option<&str>,
-) -> anyhow::Result<std::process::Child> {
+fn spawn_shell(command: &str, opts: &StageOptions) -> anyhow::Result<std::process::Child> {
     let default_shell = get_shell();
-    let shell_exe = shell.unwrap_or(&default_shell);
+    let shell_exe = opts.shell.as_deref().unwrap_or(&default_shell);
     let mut cmd = Command::new(shell_exe);
-    if interactive {
+    if opts.interactive {
         cmd.arg("-i");
         // Put interactive shells in their own session so they cannot call
         // tcsetpgrp() on the parent's controlling terminal.  Without this,
@@ -630,8 +628,7 @@ pub fn run_pipeline_streaming(
     up_to: usize,
     force: bool,
     output_modes: &[OutputMode],
-    interactive_flags: &[bool],
-    shells: &[Option<String>],
+    stage_options: &[StageOptions],
     cancel: &Arc<AtomicBool>,
     ui_tx: &std_mpsc::Sender<StreamMsg>,
 ) {
@@ -727,9 +724,8 @@ pub fn run_pipeline_streaming(
             return;
         }
 
-        let stage_interactive = interactive_flags.get(i).copied().unwrap_or(false);
-        let stage_shell = shells.get(i).and_then(|s| s.as_deref());
-        let mut child = match spawn_shell(&commands[i], stage_interactive, stage_shell) {
+        let opts = stage_options.get(i).cloned().unwrap_or_default();
+        let mut child = match spawn_shell(&commands[i], &opts) {
             Ok(c) => c,
             Err(e) => {
                 for ls in live.iter_mut().flatten() {

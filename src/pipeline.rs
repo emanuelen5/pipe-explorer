@@ -1,3 +1,58 @@
+/// Resolved (effective) options for executing a single stage.
+///
+/// Every field has a concrete value — there are no `Option` gaps.
+/// Compute this by calling [`StageOverrides::resolve`] against a
+/// [`StageOptions`] (the global defaults).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageOptions {
+    /// Run the shell with `-i` (interactive mode).
+    pub interactive: bool,
+    /// Shell executable path. `None` means auto-detect.
+    pub shell: Option<String>,
+}
+
+impl Default for StageOptions {
+    fn default() -> Self {
+        Self {
+            interactive: false,
+            shell: None,
+        }
+    }
+}
+
+/// Per-stage option overrides.
+///
+/// Every field is `Option<T>`: `None` means "inherit from the global
+/// defaults", `Some(v)` means "use this value for this stage".
+/// Add new options here and in [`StageOptions`]; the rest of the code
+/// adapts automatically via [`resolve`](StageOverrides::resolve) and
+/// [`has_overrides`](StageOverrides::has_overrides).
+#[derive(Debug, Clone, Default)]
+pub struct StageOverrides {
+    pub interactive: Option<bool>,
+    pub shell: Option<String>,
+}
+
+impl StageOverrides {
+    /// Merge these overrides on top of `defaults`, producing fully-resolved options.
+    pub fn resolve(&self, defaults: &StageOptions) -> StageOptions {
+        StageOptions {
+            interactive: self.interactive.unwrap_or(defaults.interactive),
+            shell: self.shell.clone().or_else(|| defaults.shell.clone()),
+        }
+    }
+
+    /// Returns `true` when at least one field is overridden.
+    pub fn has_overrides(&self) -> bool {
+        self.interactive.is_some() || self.shell.is_some()
+    }
+
+    /// Reset all overrides to inherited.
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
 /// A single stage in a shell pipeline.
 #[derive(Debug, Clone)]
 pub struct PipeStage {
@@ -6,13 +61,8 @@ pub struct PipeStage {
     /// Timestamp of the most recent data chunk received from the executor.
     /// Used by the renderer to highlight the stage/pipe while data is actively flowing.
     pub last_update: Option<std::time::Instant>,
-    /// When `true`, the shell is invoked with `-i` (interactive mode) so that
-    /// builtins like `history` work and rc files are sourced.
-    /// `None` means "use the global default".
-    pub interactive: Option<bool>,
-    /// Override the shell executable for this stage.
-    /// `None` means "use the global default".
-    pub shell: Option<String>,
+    /// Per-stage option overrides (interactive, shell, etc.).
+    pub overrides: StageOverrides,
 }
 
 impl PipeStage {
@@ -20,8 +70,7 @@ impl PipeStage {
         Self {
             command: command.into(),
             last_update: None,
-            interactive: None,
-            shell: None,
+            overrides: StageOverrides::default(),
         }
     }
 }

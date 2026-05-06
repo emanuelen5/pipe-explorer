@@ -160,7 +160,7 @@ fn render_stages_bar(frame: &mut Frame, app: &App, area: Rect) {
             })
             .unwrap_or(0);
         let error_mark = if stage_error { "✗" } else { "" };
-        let effective_interactive = stage.interactive.unwrap_or(app.global_defaults.interactive);
+        let effective_interactive = stage.overrides.resolve(&app.global_defaults).interactive;
         let interactive_mark = if effective_interactive { "ⁱ" } else { "" };
         let count_label = format!("{}{}{}", interactive_mark, line_count, error_mark);
 
@@ -782,7 +782,7 @@ fn render_options(frame: &mut Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = match app.options_tab {
         OptionsTab::Stage => {
             let stage = &app.pipeline.stages[selected];
-            let interactive_label = match stage.interactive {
+            let interactive_label = match stage.overrides.interactive {
                 Some(true) => "[i] Interactive shell:  ON  (stage override)",
                 Some(false) => "[i] Interactive shell:  OFF (stage override)",
                 None => {
@@ -793,14 +793,14 @@ fn render_options(frame: &mut Frame, app: &App, area: Rect) {
                     }
                 }
             };
-            let shell_label = match &stage.shell {
+            let shell_label = match &stage.overrides.shell {
                 Some(s) => format!("[s] Shell: {}  (stage override)", s),
                 None => match &app.global_defaults.shell {
                     Some(s) => format!("[s] Shell: {}  (inherited)", s),
                     None => "[s] Shell: auto-detect  (inherited)".to_string(),
                 },
             };
-            let reset_hint = if stage.interactive.is_some() || stage.shell.is_some() {
+            let reset_hint = if stage.overrides.has_overrides() {
                 "[r] Reset overrides to inherited"
             } else {
                 ""

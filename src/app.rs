@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use crate::ansi::AnsiLineIndex;
 pub use crate::executor::OutputMode;
 use crate::executor::{ExecutorCache, StageOutput, StreamMsg, run_pipeline_streaming};
-use crate::pipeline::Pipeline;
+use crate::pipeline::{Pipeline, StageOptions};
 use crate::search::{SearchHistory, SearchState};
 use crate::ui::{self, trigger_terminal_bell};
 
@@ -167,28 +167,9 @@ struct ExecRequest {
     up_to: usize,
     force: bool,
     output_modes: Vec<OutputMode>,
-    interactive_flags: Vec<bool>,
-    shells: Vec<Option<String>>,
+    stage_options: Vec<StageOptions>,
     cancel: Arc<AtomicBool>,
     result_tx: std_mpsc::Sender<StreamMsg>,
-}
-
-/// Global default settings that stages inherit unless overridden.
-#[derive(Debug, Clone)]
-pub struct GlobalDefaults {
-    /// Default interactive shell flag for all stages.
-    pub interactive: bool,
-    /// Default shell executable. `None` means auto-detect (parent shell / $SHELL / sh).
-    pub shell: Option<String>,
-}
-
-impl Default for GlobalDefaults {
-    fn default() -> Self {
-        Self {
-            interactive: false,
-            shell: None,
-        }
-    }
 }
 
 /// Which tab is active in the options overlay.
@@ -220,7 +201,7 @@ pub struct App {
     /// Inline editor for the shell field in the options overlay.
     pub options_shell_editor: Option<EditorState>,
     /// Global default settings inherited by stages.
-    pub global_defaults: GlobalDefaults,
+    pub global_defaults: StageOptions,
     /// Cancellation token shared with the current execution.
     cancel_token: Arc<AtomicBool>,
     /// Sender for triggering background execution.
@@ -320,8 +301,7 @@ impl App {
                         req.up_to,
                         req.force,
                         &req.output_modes,
-                        &req.interactive_flags,
-                        &req.shells,
+                        &req.stage_options,
                         &req.cancel,
                         &req.result_tx,
                     );
@@ -347,7 +327,7 @@ impl App {
             show_options: false,
             options_tab: OptionsTab::Stage,
             options_shell_editor: None,
-            global_defaults: GlobalDefaults::default(),
+            global_defaults: StageOptions::default(),
             cancel_token: Arc::new(AtomicBool::new(false)),
             exec_tx,
             exec_rx,
@@ -400,21 +380,11 @@ impl App {
         let up_to = self.pipeline.selected;
         let output_modes: Vec<OutputMode> =
             self.stage_views.iter().map(|v| v.output_mode).collect();
-        let interactive_flags: Vec<bool> = self
+        let stage_options: Vec<StageOptions> = self
             .pipeline
             .stages
             .iter()
-            .map(|s| s.interactive.unwrap_or(self.global_defaults.interactive))
-            .collect();
-        let shells: Vec<Option<String>> = self
-            .pipeline
-            .stages
-            .iter()
-            .map(|s| {
-                s.shell
-                    .clone()
-                    .or_else(|| self.global_defaults.shell.clone())
-            })
+            .map(|s| s.overrides.resolve(&self.global_defaults))
             .collect();
 
         // Create the sync channel for the executor.
@@ -425,8 +395,7 @@ impl App {
             up_to,
             force,
             output_modes,
-            interactive_flags,
-            shells,
+            stage_options,
             cancel,
             result_tx: sync_tx,
         };
@@ -547,9 +516,10 @@ impl App {
         let idx = self.pipeline.selected;
         let stage = &mut self.pipeline.stages[idx];
         let effective = stage
+            .overrides
             .interactive
             .unwrap_or(self.global_defaults.interactive);
-        stage.interactive = Some(!effective);
+        stage.overrides.interactive = Some(!effective);
         self.trigger_exec(true);
     }
 
@@ -1493,7 +1463,7 @@ impl App {
                                 OptionsTab::Stage => {
                                     if !self.pipeline.is_empty() {
                                         let idx = self.pipeline.selected;
-                                        self.pipeline.stages[idx].shell = shell;
+                                        self.pipeline.stages[idx].overrides.shell = shell;
                                     }
                                 }
                                 OptionsTab::Global => {
@@ -1515,11 +1485,7 @@ impl App {
                     KeyCode::Esc | KeyCode::Char('q') => {
                         self.show_options = false;
                     }
-                    KeyCode::Tab
-                    | KeyCode::Left
-                    | KeyCode::Right
-                    | KeyCode::Char('h')
-                    | KeyCode::Char('l') => {
+                    KeyCode::Tab => {
                         self.options_tab = match self.options_tab {
                             OptionsTab::Stage => OptionsTab::Global,
                             OptionsTab::Global => OptionsTab::Stage,
@@ -1534,7 +1500,10 @@ impl App {
                         let current = match self.options_tab {
                             OptionsTab::Stage => {
                                 let idx = self.pipeline.selected;
-                                self.pipeline.stages.get(idx).and_then(|s| s.shell.clone())
+                                self.pipeline
+                                    .stages
+                                    .get(idx)
+                                    .and_then(|s| s.overrides.shell.clone())
                             }
                             OptionsTab::Global => self.global_defaults.shell.clone(),
                         };
@@ -1545,8 +1514,7 @@ impl App {
                         // Reset stage overrides to inherited
                         if !self.pipeline.is_empty() {
                             let idx = self.pipeline.selected;
-                            self.pipeline.stages[idx].interactive = None;
-                            self.pipeline.stages[idx].shell = None;
+                            self.pipeline.stages[idx].overrides.clear();
                             self.trigger_exec(true);
                         }
                     }
