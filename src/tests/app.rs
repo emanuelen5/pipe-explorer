@@ -1560,3 +1560,121 @@ async fn test_all_done_clears_all_last_updates() {
         "stage 1 last_update should be None after AllDone"
     );
 }
+
+// --- Ctrl+K / Ctrl+U / Ctrl+Y kill-yank tests ---
+
+#[test]
+fn test_editor_ctrl_k_kills_to_end() {
+    let mut editor = EditorState::new("hello world".to_string());
+    editor.cursor = 5;
+    let key = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL);
+    editor.handle_key(key);
+    assert_eq!(editor.content, "hello");
+    assert_eq!(editor.cursor, 5);
+    assert_eq!(editor._cut_buffer, " world");
+}
+
+#[test]
+fn test_editor_ctrl_k_at_end_kills_nothing() {
+    let mut editor = EditorState::new("hello".to_string());
+    editor.cursor = 5;
+    let key = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL);
+    editor.handle_key(key);
+    assert_eq!(editor.content, "hello");
+    assert_eq!(editor.cursor, 5);
+    assert_eq!(editor._cut_buffer, "");
+}
+
+#[test]
+fn test_editor_ctrl_u_kills_to_beginning() {
+    let mut editor = EditorState::new("hello world".to_string());
+    editor.cursor = 5;
+    let key = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL);
+    editor.handle_key(key);
+    assert_eq!(editor.content, " world");
+    assert_eq!(editor.cursor, 0);
+    assert_eq!(editor._cut_buffer, "hello");
+}
+
+#[test]
+fn test_editor_ctrl_u_at_beginning_kills_nothing() {
+    let mut editor = EditorState::new("hello".to_string());
+    editor.cursor = 0;
+    let key = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL);
+    editor.handle_key(key);
+    assert_eq!(editor.content, "hello");
+    assert_eq!(editor.cursor, 0);
+    assert_eq!(editor._cut_buffer, "");
+}
+
+#[test]
+fn test_editor_ctrl_y_pastes_after_ctrl_k() {
+    let mut editor = EditorState::new("hello world".to_string());
+    editor.cursor = 5;
+    // Kill to end
+    editor.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+    assert_eq!(editor.content, "hello");
+    // Move cursor to beginning
+    editor.cursor = 0;
+    // Yank
+    editor.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+    assert_eq!(editor.content, " worldhello");
+    assert_eq!(editor.cursor, 6);
+}
+
+#[test]
+fn test_editor_ctrl_y_pastes_after_ctrl_u() {
+    let mut editor = EditorState::new("hello world".to_string());
+    editor.cursor = 5;
+    // Kill to beginning
+    editor.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    assert_eq!(editor.content, " world");
+    assert_eq!(editor.cursor, 0);
+    // Move cursor to end
+    editor.cursor = editor.content.len();
+    // Yank
+    editor.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+    assert_eq!(editor.content, " worldhello");
+    assert_eq!(editor.cursor, 11);
+}
+
+#[test]
+fn test_editor_ctrl_y_with_empty_buffer_does_nothing() {
+    let mut editor = EditorState::new("hello".to_string());
+    editor.cursor = 3;
+    // Yank without prior kill — buffer is empty
+    editor.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+    assert_eq!(editor.content, "hello");
+    assert_eq!(editor.cursor, 3);
+}
+
+#[test]
+fn test_editor_ctrl_k_then_ctrl_k_overwrites_buffer() {
+    let mut editor = EditorState::new("abc def ghi".to_string());
+    editor.cursor = 4;
+    // First kill: saves "def ghi"
+    editor.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+    assert_eq!(editor._cut_buffer, "def ghi");
+    // Reset content and cursor for a second kill
+    editor.content = "xyz 123".to_string();
+    editor.cursor = 4;
+    editor.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+    // Buffer should now contain the second kill, not the first
+    assert_eq!(editor._cut_buffer, "123");
+    assert_eq!(editor.content, "xyz ");
+}
+
+#[test]
+fn test_editor_ctrl_y_can_paste_multiple_times() {
+    let mut editor = EditorState::new("hello world".to_string());
+    editor.cursor = 5;
+    // Kill " world"
+    editor.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+    assert_eq!(editor.content, "hello");
+    // Yank at end
+    editor.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+    assert_eq!(editor.content, "hello world");
+    // Yank again at end
+    editor.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+    assert_eq!(editor.content, "hello world world");
+}
