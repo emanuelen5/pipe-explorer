@@ -150,14 +150,16 @@ impl EditorState {
                     self.cursor = next;
                 }
             }
-            KeyCode::Home | KeyCode::Char('a')
-                if key.code == KeyCode::Home || key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
+            KeyCode::Home => {
                 self.cursor = 0;
             }
-            KeyCode::End | KeyCode::Char('e')
-                if key.code == KeyCode::End || key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.cursor = 0;
+            }
+            KeyCode::End => {
+                self.cursor = self.content.len();
+            }
+            KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.cursor = self.content.len();
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
