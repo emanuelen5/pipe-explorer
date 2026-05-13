@@ -103,8 +103,7 @@ impl EditorState {
     pub fn handle_key(&mut self, key: KeyEvent) -> EditorKeyResult {
         match key.code {
             // --- Action keys: delegate to caller ---
-            KeyCode::Enter | KeyCode::Esc | KeyCode::Tab => EditorKeyResult::Unhandled,
-
+            KeyCode::Enter | KeyCode::Esc | KeyCode::Tab => return EditorKeyResult::Unhandled,
             // --- Common editing keys ---
             KeyCode::Backspace => {
                 if self.cursor > 0 {
@@ -117,33 +116,28 @@ impl EditorState {
                     self.content.remove(prev);
                     self.cursor = prev;
                 }
-                EditorKeyResult::Handled
             }
             KeyCode::Delete => {
                 if self.cursor < self.content.len() {
                     self.content.remove(self.cursor);
                 }
-                EditorKeyResult::Handled
             }
             KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 let new_cursor = word_left_pos(&self.content[..self.cursor]);
                 debug_assert!(self.content.is_char_boundary(new_cursor));
                 self.cursor = new_cursor;
-                EditorKeyResult::Handled
             }
             KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 let delta = word_right_pos(&self.content[self.cursor..]);
                 let new_cursor = self.cursor + delta;
                 debug_assert!(self.content.is_char_boundary(new_cursor));
                 self.cursor = new_cursor;
-                EditorKeyResult::Handled
             }
             KeyCode::Left => {
                 if self.cursor > 0 {
                     let s = &self.content[..self.cursor];
                     self.cursor = s.char_indices().last().map(|(i, _)| i).unwrap_or(0);
                 }
-                EditorKeyResult::Handled
             }
             KeyCode::Right => {
                 if self.cursor < self.content.len() {
@@ -155,27 +149,24 @@ impl EditorState {
                         .unwrap_or(self.content.len());
                     self.cursor = next;
                 }
-                EditorKeyResult::Handled
             }
             KeyCode::Home | KeyCode::Char('a')
                 if key.code == KeyCode::Home || key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 self.cursor = 0;
-                EditorKeyResult::Handled
             }
             KeyCode::End | KeyCode::Char('e')
                 if key.code == KeyCode::End || key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 self.cursor = self.content.len();
-                EditorKeyResult::Handled
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.content.insert(self.cursor, c);
                 self.cursor += c.len_utf8();
-                EditorKeyResult::Handled
             }
-            _ => EditorKeyResult::Unhandled,
+            _ => return EditorKeyResult::Unhandled,
         }
+        EditorKeyResult::Handled
     }
 }
 
