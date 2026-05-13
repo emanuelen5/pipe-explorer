@@ -162,6 +162,13 @@ impl EditorState {
             KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.cursor = self.content.len();
             }
+            KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.content.truncate(self.cursor);
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.content.drain(..self.cursor);
+                self.cursor = 0;
+            }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.content.insert(self.cursor, c);
                 self.cursor += c.len_utf8();
