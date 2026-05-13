@@ -63,6 +63,8 @@ pub struct EditorState {
     pub cursor: usize,
     /// Horizontal scroll offset (in display columns).
     pub scroll_x: usize,
+    /// For Ctrl+K/Ctrl+U kill-line functionality; not exposed to the UI
+    _cut_buffer: String,
 }
 
 impl EditorState {
@@ -73,6 +75,7 @@ impl EditorState {
             content,
             cursor,
             scroll_x: 0,
+            _cut_buffer: String::new(),
         }
     }
 
@@ -82,6 +85,7 @@ impl EditorState {
             content: String::new(),
             cursor: 0,
             scroll_x: 0,
+            _cut_buffer: String::new(),
         }
     }
 
@@ -163,11 +167,19 @@ impl EditorState {
                 self.cursor = self.content.len();
             }
             KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self._cut_buffer = self.content[self.cursor..].to_string();
                 self.content.truncate(self.cursor);
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self._cut_buffer = self.content[..self.cursor].to_string();
                 self.content.drain(..self.cursor);
                 self.cursor = 0;
+            }
+            KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if !self._cut_buffer.is_empty() {
+                    self.content.insert_str(self.cursor, &self._cut_buffer);
+                    self.cursor += self._cut_buffer.len();
+                }
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.content.insert(self.cursor, c);
