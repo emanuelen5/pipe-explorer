@@ -10,7 +10,8 @@ use ratatui::{
 use std::io::Write;
 
 use crate::ansi::ansi_text_to_visible_lines;
-use crate::app::{App, AppMode, EditorState, OptionsTab, OutputMode};
+use crate::app::{App, AppMode, OptionsTab, OutputMode};
+use crate::editor::EditorState;
 
 /// Maximum width (columns) of the command editor overlay dialog.
 pub const EDITOR_DIALOG_MAX_WIDTH: u16 = 120;

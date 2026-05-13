@@ -35,6 +35,7 @@ Key features:
 src/
 ├── main.rs        # Entry point: CLI argument parsing and tokio runtime setup
 ├── app.rs         # Core application state, event loop, and mode management
+├── editor.rs      # Inline text-editor state (EditorState, key handling, scroll)
 ├── executor.rs    # Shell command execution with streaming output and caching
 ├── ui.rs          # Terminal UI rendering (ratatui layouts, panels, dialogs)
 ├── pipeline.rs    # Pipeline data structures (PipeStage, Pipeline, navigation)

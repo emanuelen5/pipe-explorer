@@ -1,5 +1,6 @@
 mod ansi;
 mod app;
+mod editor;
 mod executor;
 mod pipeline;
 mod search;
