@@ -858,6 +858,36 @@ impl App {
         }
     }
 
+    fn handle_pager_scrolling(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => self.scroll_down(1),
+            KeyCode::Char('k') | KeyCode::Up => self.scroll_up(1),
+            KeyCode::PageDown | KeyCode::Char('f')
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.scroll_down(20);
+            }
+            KeyCode::PageDown => self.scroll_down(20),
+            KeyCode::PageUp | KeyCode::Char('b')
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.scroll_up(20);
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.scroll_up(20)
+            }
+            KeyCode::PageUp => self.scroll_up(20),
+            KeyCode::Char('g') | KeyCode::Home => {
+                self.view_mut().scroll = 0;
+            }
+            KeyCode::Char('G') | KeyCode::End => {
+                self.view_mut().scroll = self.compute_max_scroll();
+            }
+            _ => return false,
+        }
+        true
+    }
+
     /// Handle a single keyboard key event in Normal mode.
     fn handle_normal_key(&mut self, key: KeyEvent) -> bool {
         let quit = match key.code {
@@ -867,6 +897,10 @@ impl App {
         };
         if quit {
             return true; // signal quit
+        }
+
+        if self.handle_pager_scrolling(key) {
+            return false;
         }
 
         match key.code {
@@ -994,31 +1028,6 @@ impl App {
                 self.set_output_mode(idx, OutputMode::Combined);
             }
 
-            // Pager scrolling
-            KeyCode::Char('j') | KeyCode::Down => self.scroll_down(1),
-            KeyCode::Char('k') | KeyCode::Up => self.scroll_up(1),
-            KeyCode::PageDown | KeyCode::Char('f')
-                if key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                self.scroll_down(20);
-            }
-            KeyCode::PageDown => self.scroll_down(20),
-            KeyCode::PageUp | KeyCode::Char('b')
-                if key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                self.scroll_up(20);
-            }
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.scroll_up(20)
-            }
-            KeyCode::PageUp => self.scroll_up(20),
-            KeyCode::Char('g') | KeyCode::Home => {
-                self.view_mut().scroll = 0;
-            }
-            KeyCode::Char('G') | KeyCode::End => {
-                self.view_mut().scroll = self.compute_max_scroll();
-            }
-
             // Search
             KeyCode::Char('/') => {
                 self.start_search();
@@ -1074,6 +1083,10 @@ impl App {
                 }
             }
             _ => {}
+        }
+        // It's nice to be able to scroll the output while editing
+        if self.handle_pager_scrolling(key) {
+            return false;
         }
         false
     }
