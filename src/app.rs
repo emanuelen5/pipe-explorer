@@ -114,6 +114,8 @@ pub struct App {
     undo_stack: Vec<Pipeline>,
     /// Redo history stack: populated by undo(), cleared on any new pipeline change.
     redo_stack: Vec<Pipeline>,
+    /// If the application should quit when finishing the current event
+    should_quit: bool,
 }
 
 /// How many visual (wrapped) rows a single `Line` occupies in a Paragraph
@@ -179,6 +181,7 @@ impl App {
             command_completions: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            should_quit: false,
         }
     }
 
@@ -889,18 +892,19 @@ impl App {
     }
 
     /// Handle a single keyboard key event in Normal mode.
-    fn handle_normal_key(&mut self, key: KeyEvent) -> bool {
+    fn handle_normal_key(&mut self, key: KeyEvent) {
         let quit = match key.code {
             KeyCode::Char('q') => true,
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => true,
             _ => false,
         };
         if quit {
-            return true; // signal quit
+            self.should_quit = true;
+            return;
         }
 
         if self.handle_pager_scrolling(key) {
-            return false;
+            return;
         }
 
         match key.code {
@@ -1060,15 +1064,14 @@ impl App {
 
             _ => {}
         }
-        false
     }
 
     /// Handle a key event in the inline editor.
-    fn handle_editor_key(&mut self, key: KeyEvent) -> bool {
+    fn handle_editor_key(&mut self, key: KeyEvent) {
         // Let the editor try common editing keys first.
         if let Some(editor) = self.editor_mut() {
             if editor.handle_key(key) == EditorKeyResult::Handled {
-                return false;
+                return;
             }
         }
         // Action keys not consumed by the editor.
@@ -1086,13 +1089,12 @@ impl App {
         }
         // It's nice to be able to scroll the output while editing
         if self.handle_pager_scrolling(key) {
-            return false;
+            return;
         }
-        false
     }
 
     /// Handle a key event in the delete confirmation prompt.
-    fn handle_confirm_delete_key(&mut self, key: KeyEvent) -> bool {
+    fn handle_confirm_delete_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
                 self.save_pipeline_state();
@@ -1112,7 +1114,6 @@ impl App {
                 self.mode = AppMode::Normal;
             }
         }
-        false
     }
 
     /// Handle a key event while entering a search query.
@@ -1204,9 +1205,9 @@ impl App {
     const KNOWN_COMMANDS: &'static [&'static str] = &["help", "interactive", "options", "quit"];
 
     /// Handle a key event while in command mode (`:` prompt).
-    fn handle_command_key(&mut self, key: KeyEvent) -> bool {
+    fn handle_command_key(&mut self, key: KeyEvent) {
         let AppMode::Command(ref mut editor) = self.mode else {
-            return false;
+            return;
         };
 
         self.command_completions = None;
@@ -1214,12 +1215,12 @@ impl App {
         // Special case: Backspace on empty content exits command mode.
         if editor.content.is_empty() && key.code == KeyCode::Backspace {
             self.mode = AppMode::Normal;
-            return false;
+            return;
         }
 
         // Let the editor try common editing keys first.
         if editor.handle_key(key) == EditorKeyResult::Handled {
-            return false;
+            return;
         }
 
         // Action keys not consumed by the editor.
@@ -1234,7 +1235,8 @@ impl App {
                 if cmd == "h" || cmd == "help" {
                     self.show_help = true;
                 } else if cmd == "q" || cmd == "quit" {
-                    return true;
+                    self.should_quit = true;
+                    return;
                 } else if cmd == "i" || cmd == "interactive" {
                     self.toggle_interactive();
                 } else if cmd == "o" || cmd == "options" || cmd == "opt" {
@@ -1244,7 +1246,7 @@ impl App {
             KeyCode::Tab => {
                 // Tab-complete the current content against known commands.
                 let AppMode::Command(ref mut editor) = self.mode else {
-                    return false;
+                    return;
                 };
                 let matches: Vec<&str> = Self::KNOWN_COMMANDS
                     .iter()
@@ -1281,7 +1283,6 @@ impl App {
             }
             _ => {}
         }
-        false
     }
 
     /// Ensure stage_views has an entry for every pipeline stage.
@@ -1298,12 +1299,12 @@ impl App {
         }
     }
 
-    /// Handle a terminal event. Returns `true` if the app should quit.
-    pub fn handle_event(&mut self, event: Event) -> bool {
+    /// Handle a terminal event
+    pub fn handle_event(&mut self, event: Event) {
         // Close help on any key
         if self.show_help {
             self.show_help = false;
-            return false;
+            return;
         }
 
         // Options overlay: handle keys within the overlay
@@ -1314,7 +1315,7 @@ impl App {
                     // Let the editor try common editing keys first.
                     if let Some(ref mut editor) = self.options_shell_editor {
                         if editor.handle_key(key) == EditorKeyResult::Handled {
-                            return false;
+                            return;
                         }
                     }
                     // Action keys not consumed by the editor.
@@ -1349,7 +1350,7 @@ impl App {
                         }
                         _ => {}
                     }
-                    return false;
+                    return;
                 }
 
                 match key.code {
@@ -1392,24 +1393,24 @@ impl App {
                     _ => {}
                 }
             }
-            return false;
+            return;
         }
 
         match event {
             Event::Key(key) => {
                 if matches!(self.mode, AppMode::Normal) {
-                    self.handle_normal_key(key)
+                    self.handle_normal_key(key);
                 } else if matches!(self.mode, AppMode::Editing { .. } | AppMode::Saving(_)) {
-                    self.handle_editor_key(key)
+                    self.handle_editor_key(key);
                 } else if matches!(self.mode, AppMode::ConfirmingDelete) {
-                    self.handle_confirm_delete_key(key)
+                    self.handle_confirm_delete_key(key);
                 } else if matches!(self.mode, AppMode::Command(_)) {
-                    self.handle_command_key(key)
+                    self.handle_command_key(key);
                 } else {
-                    self.handle_search_key(key)
+                    self.handle_search_key(key);
                 }
             }
-            _ => false,
+            _ => {}
         }
     }
 }
@@ -1476,15 +1477,16 @@ async fn run_inner(
             maybe_event = event_stream.next() => {
                 match maybe_event {
                     Some(Ok(event)) => {
-                        if app.handle_event(event) {
-                            break;
-                        }
+                        app.handle_event(event);
                         dirty = true;
                     }
                     Some(Err(e)) => {
                         return Err(anyhow::anyhow!("{}", e));
                     }
                     None => break,
+                }
+                if app.should_quit {
+                    break;
                 }
             }
             Some(msg) = app.exec_rx.recv() => {
