@@ -2,6 +2,7 @@ mod ansi;
 mod app;
 mod editor;
 mod executor;
+mod history;
 mod pipeline;
 mod search;
 mod ui;
@@ -9,6 +10,7 @@ mod ui;
 use clap::Parser;
 
 use app::{App, run};
+use history::History;
 use pipeline::Pipeline;
 
 const LONG_ABOUT: &str = concat!(
@@ -32,6 +34,15 @@ struct Args {
     /// separator
     #[arg(long, short)]
     parse: bool,
+
+    /// Resume a pipeline session. Without a number, resumes the most
+    /// recent one. With a number N, resumes the Nth most recent (1-indexed).
+    #[arg(long, short, value_name = "N")]
+    resume: Option<Option<usize>>,
+
+    /// List recent pipeline sessions and exit.
+    #[arg(long)]
+    history: bool,
 }
 
 #[tokio::main]
@@ -45,10 +56,55 @@ async fn main() {
     }));
 
     let args = Args::parse();
-    let pipeline = Pipeline::from_commands(args.cmds, args.parse);
+
+    // Handle --history: print recent pipelines and exit.
+    if args.history {
+        let history = History::load();
+        print!("{}", history.display());
+        std::process::exit(0);
+    }
+
+    // Handle --resume: resume a pipeline session.
+    let pipeline = if let Some(n) = args.resume {
+        let index = n.unwrap_or(1);
+        if index == 0 {
+            eprintln!("error: --resume index must be >= 1");
+            std::process::exit(1);
+        }
+        let history = History::load();
+        match history.get(index - 1) {
+            Some(entry) => Pipeline::new(
+                entry
+                    .commands
+                    .iter()
+                    .map(|c| crate::pipeline::PipeStage::new(c.as_str()))
+                    .collect(),
+            ),
+            _ => {
+                eprintln!(
+                    "error: no historic pipeline at position {}. Use --history to list.",
+                    index
+                );
+                std::process::exit(1);
+            }
+        }
+    } else {
+        Pipeline::from_commands(args.cmds, args.parse)
+    };
 
     let mut app = App::new(pipeline);
     let result = run(&mut app).await;
+
+    // Save the pipeline to history before exiting.
+    let commands: Vec<String> = app
+        .pipeline
+        .stages
+        .iter()
+        .map(|s| s.command.clone())
+        .collect();
+    let mut history = History::load();
+    history.add(&commands);
+    history.save();
 
     // Print the pipeline command with mode-aware connectors so the user can
     // copy-paste it into a terminal.

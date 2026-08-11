@@ -1049,6 +1049,8 @@ dependencies = [
  "libc",
  "ratatui",
  "regex",
+ "serde",
+ "serde_json",
  "sha2",
  "tokio",
 ]
