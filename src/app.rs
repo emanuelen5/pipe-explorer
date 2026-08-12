@@ -18,7 +18,8 @@ use crate::ansi::AnsiLineIndex;
 pub use crate::editor::{EditorKeyResult, EditorState};
 pub use crate::executor::OutputMode;
 use crate::executor::{ExecutorCache, StageOutput, StreamMsg, run_pipeline_streaming};
-use crate::pipeline::{Pipeline, StageOptions};
+use crate::history::History;
+use crate::pipeline::{PipeStage, Pipeline, StageOptions};
 use crate::search::{SearchHistory, SearchState};
 use crate::ui::{self, trigger_terminal_bell};
 
@@ -53,6 +54,19 @@ pub enum AppMode {
     Searching,
     /// Vim-style `:command` mode.
     Command(EditorState),
+    /// Browsing pipeline history.
+    BrowsingHistory(HistoryBrowser),
+}
+
+/// State for the interactive history browser overlay.
+#[derive(Debug)]
+pub struct HistoryBrowser {
+    /// The loaded history entries.
+    pub entries: Vec<crate::history::HistoryEntry>,
+    /// Currently highlighted entry index.
+    pub selected: usize,
+    /// If true, showing a confirmation prompt for deletion.
+    pub confirming_delete: bool,
 }
 
 /// A request sent to the long-lived background executor task.
@@ -1047,6 +1061,11 @@ impl App {
                 self.show_help = !self.show_help;
             }
 
+            // History browser
+            KeyCode::Char('H') => {
+                self.open_history_browser();
+            }
+
             // Enter command mode (vim-style ':')
             KeyCode::Char(':') => {
                 self.mode = AppMode::Command(EditorState::empty());
@@ -1113,6 +1132,99 @@ impl App {
                 // Any other key cancels the delete
                 self.mode = AppMode::Normal;
             }
+        }
+    }
+
+    /// Open the history browser overlay.
+    fn open_history_browser(&mut self) {
+        let history = History::load();
+        self.mode = AppMode::BrowsingHistory(HistoryBrowser {
+            entries: history.entries,
+            selected: 0,
+            confirming_delete: false,
+        });
+    }
+
+    /// Handle a key event while browsing history.
+    fn handle_history_browser_key(&mut self, key: KeyEvent) {
+        let AppMode::BrowsingHistory(ref mut browser) = self.mode else {
+            return;
+        };
+
+        // If confirming a delete, only respond to y/n.
+        if browser.confirming_delete {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    let idx = browser.selected;
+                    browser.entries.remove(idx);
+                    // Persist the deletion.
+                    let mut history = History::load();
+                    history.remove(idx);
+                    history.save();
+                    // Adjust selection.
+                    if browser.selected >= browser.entries.len() && browser.selected > 0 {
+                        browser.selected -= 1;
+                    }
+                    browser.confirming_delete = false;
+                    // If history is now empty, close the browser.
+                    if browser.entries.is_empty() {
+                        self.mode = AppMode::Normal;
+                    }
+                }
+                _ => {
+                    browser.confirming_delete = false;
+                }
+            }
+            return;
+        }
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.mode = AppMode::Normal;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if !browser.entries.is_empty() && browser.selected + 1 < browser.entries.len() {
+                    browser.selected += 1;
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if browser.selected > 0 {
+                    browser.selected -= 1;
+                }
+            }
+            KeyCode::Home | KeyCode::Char('g') => {
+                browser.selected = 0;
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                if !browser.entries.is_empty() {
+                    browser.selected = browser.entries.len() - 1;
+                }
+            }
+            KeyCode::Delete | KeyCode::Char('x') => {
+                if !browser.entries.is_empty() {
+                    browser.confirming_delete = true;
+                }
+            }
+            KeyCode::Enter => {
+                // Load the selected pipeline and close the browser.
+                if let Some(entry) = browser.entries.get(browser.selected) {
+                    let stages: Vec<PipeStage> = entry
+                        .commands
+                        .iter()
+                        .map(|c| PipeStage::new(c.as_str()))
+                        .collect();
+                    if !stages.is_empty() {
+                        self.save_pipeline_state();
+                        self.pipeline = Pipeline::new(stages);
+                        self.sync_stage_views();
+                        self.mode = AppMode::Normal;
+                        self.trigger_exec(false);
+                        return;
+                    }
+                }
+                self.mode = AppMode::Normal;
+            }
+            _ => {}
         }
     }
 
@@ -1202,7 +1314,8 @@ impl App {
     }
 
     /// Known commands supported in command mode.
-    const KNOWN_COMMANDS: &'static [&'static str] = &["help", "interactive", "options", "quit"];
+    const KNOWN_COMMANDS: &'static [&'static str] =
+        &["help", "history", "interactive", "options", "quit"];
 
     /// Handle a key event while in command mode (`:` prompt).
     fn handle_command_key(&mut self, key: KeyEvent) {
@@ -1241,6 +1354,8 @@ impl App {
                     self.toggle_interactive();
                 } else if cmd == "o" || cmd == "options" || cmd == "opt" {
                     self.show_options = true;
+                } else if cmd == "history" || cmd == "hist" {
+                    self.open_history_browser();
                 }
             }
             KeyCode::Tab => {
@@ -1404,6 +1519,8 @@ impl App {
                     self.handle_editor_key(key);
                 } else if matches!(self.mode, AppMode::ConfirmingDelete) {
                     self.handle_confirm_delete_key(key);
+                } else if matches!(self.mode, AppMode::BrowsingHistory(_)) {
+                    self.handle_history_browser_key(key);
                 } else if matches!(self.mode, AppMode::Command(_)) {
                     self.handle_command_key(key);
                 } else {

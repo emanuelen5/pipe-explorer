@@ -10,7 +10,7 @@ use ratatui::{
 use std::io::Write;
 
 use crate::ansi::ansi_text_to_visible_lines;
-use crate::app::{App, AppMode, OptionsTab, OutputMode};
+use crate::app::{App, AppMode, HistoryBrowser, OptionsTab, OutputMode};
 use crate::editor::EditorState;
 
 /// Maximum width (columns) of the command editor overlay dialog.
@@ -51,6 +51,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         AppMode::Editing { .. } => render_editor_overlay(frame, app, area),
         AppMode::Saving(_) => render_save_overlay(frame, app, area),
         AppMode::ConfirmingDelete => render_confirm_delete_overlay(frame, app, area),
+        AppMode::BrowsingHistory(browser) => {
+            render_history_browser(frame, browser, area);
+        }
         _ => {}
     }
     if app.show_help {
@@ -460,6 +463,10 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             "DELETE?".to_string(),
             "[y]confirm delete  [any]cancel".to_string(),
         ),
+        AppMode::BrowsingHistory(_) => (
+            "HISTORY".to_string(),
+            "[↑↓]navigate  [Enter]load  [Del/x]delete  [q/Esc]close".to_string(),
+        ),
         AppMode::Searching | AppMode::Command(_) => unreachable!(),
     };
 
@@ -689,6 +696,76 @@ fn render_confirm_delete_overlay(frame: &mut Frame, app: &App, area: Rect) {
 
     let para = Paragraph::new(text).block(block).wrap(Wrap { trim: false });
     frame.render_widget(para, dialog_area);
+}
+
+/// Render the interactive history browser overlay.
+fn render_history_browser(frame: &mut Frame, browser: &HistoryBrowser, area: Rect) {
+    let width = area.width.saturating_sub(4).min(90);
+    // Reserve height for borders (2) + footer (1); show as many entries as fit.
+    let max_visible = (area.height.saturating_sub(5)) as usize;
+    let entry_count = browser.entries.len();
+    let visible_count = entry_count.min(max_visible);
+    let height = (visible_count as u16) + 4; // 2 border + 1 footer + 1 padding
+
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let dialog_area = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, dialog_area);
+
+    let title = if browser.confirming_delete {
+        " ⚠️ Delete this entry? [y]es / [any]cancel "
+    } else {
+        " History — ↑↓ navigate, Enter load, Del/x delete, q/Esc close "
+    };
+
+    let block =
+        Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .style(if browser.confirming_delete {
+                Style::default().bg(Color::DarkGray).fg(Color::Yellow)
+            } else {
+                Style::default().bg(Color::DarkGray)
+            });
+
+    // Compute scroll offset to keep the selected entry visible.
+    let scroll = if browser.selected < max_visible {
+        0
+    } else {
+        browser.selected - max_visible + 1
+    };
+
+    let inner_width = width.saturating_sub(2) as usize;
+    let items: Vec<ListItem> = browser
+        .entries
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(max_visible)
+        .map(|(i, entry)| {
+            let pipeline_str = entry.commands.join(" | ");
+            let label = format!("{:>3}  {}", i + 1, pipeline_str);
+            // Truncate to fit width.
+            let display: String = if label.len() > inner_width {
+                format!("{}…", &label[..inner_width.saturating_sub(1)])
+            } else {
+                label
+            };
+            let style = if i == browser.selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            ListItem::new(Span::styled(display, style))
+        })
+        .collect();
+
+    let list = List::new(items).block(block);
+    frame.render_widget(list, dialog_area);
 }
 
 /// Render a simple list of keybindings for the help overlay.

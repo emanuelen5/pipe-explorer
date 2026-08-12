@@ -89,6 +89,17 @@ impl History {
         self.entries.get(index)
     }
 
+    /// Remove the entry at the given index (0-indexed).
+    /// Returns true if an entry was removed.
+    pub fn remove(&mut self, index: usize) -> bool {
+        if index < self.entries.len() {
+            self.entries.remove(index);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Format history for display to the user.
     pub fn display(&self) -> String {
         if self.entries.is_empty() {
