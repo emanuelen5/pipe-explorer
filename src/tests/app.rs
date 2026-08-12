@@ -1228,3 +1228,214 @@ async fn test_all_done_clears_all_last_updates() {
         "stage 1 last_update should be None after AllDone"
     );
 }
+
+// ─── History browser tests ───────────────────────────────────────────────────
+
+use crate::history::HistoryEntry;
+
+fn make_history_browser(n: usize) -> App {
+    let pipeline = parse_pipeline("echo placeholder");
+    let mut app = App::new(pipeline);
+    let entries: Vec<HistoryEntry> = (0..n)
+        .map(|i| HistoryEntry {
+            commands: vec![format!("cmd{}", i)],
+            timestamp: 1000 + i as u64,
+        })
+        .collect();
+    app.mode = AppMode::BrowsingHistory(HistoryBrowser {
+        entries,
+        selected: 0,
+        confirming_delete: false,
+        count_prefix: None,
+    });
+    app
+}
+
+#[tokio::test]
+async fn test_history_browser_navigation_down_up() {
+    let mut app = make_history_browser(5);
+    // j moves down
+    app.handle_event(make_event("j"));
+    if let AppMode::BrowsingHistory(ref b) = app.mode {
+        assert_eq!(b.selected, 1);
+    } else {
+        panic!("expected BrowsingHistory mode");
+    }
+    // k moves up
+    app.handle_event(make_event("k"));
+    if let AppMode::BrowsingHistory(ref b) = app.mode {
+        assert_eq!(b.selected, 0);
+    } else {
+        panic!("expected BrowsingHistory mode");
+    }
+}
+
+#[tokio::test]
+async fn test_history_browser_g_goes_to_top() {
+    let mut app = make_history_browser(10);
+    // Move to position 5
+    for _ in 0..5 {
+        app.handle_event(make_event("j"));
+    }
+    // g goes to top
+    app.handle_event(make_event("g"));
+    if let AppMode::BrowsingHistory(ref b) = app.mode {
+        assert_eq!(b.selected, 0);
+    } else {
+        panic!("expected BrowsingHistory mode");
+    }
+}
+
+#[tokio::test]
+async fn test_history_browser_G_goes_to_bottom() {
+    let mut app = make_history_browser(10);
+    app.handle_event(make_event("Shift+G"));
+    if let AppMode::BrowsingHistory(ref b) = app.mode {
+        assert_eq!(b.selected, 9);
+    } else {
+        panic!("expected BrowsingHistory mode");
+    }
+}
+
+#[tokio::test]
+async fn test_history_browser_count_prefix_with_g() {
+    let mut app = make_history_browser(10);
+    // Type "5g" to jump to entry 5 (0-indexed: 4)
+    app.handle_event(make_event("5"));
+    app.handle_event(make_event("g"));
+    if let AppMode::BrowsingHistory(ref b) = app.mode {
+        assert_eq!(b.selected, 4);
+    } else {
+        panic!("expected BrowsingHistory mode");
+    }
+}
+
+#[tokio::test]
+async fn test_history_browser_count_prefix_with_G() {
+    let mut app = make_history_browser(10);
+    // Type "3G" to jump to entry 3 (0-indexed: 2)
+    app.handle_event(make_event("3"));
+    app.handle_event(make_event("Shift+G"));
+    if let AppMode::BrowsingHistory(ref b) = app.mode {
+        assert_eq!(b.selected, 2);
+    } else {
+        panic!("expected BrowsingHistory mode");
+    }
+}
+
+#[tokio::test]
+async fn test_history_browser_count_prefix_multidigit() {
+    let mut app = make_history_browser(20);
+    // "12g" jumps to entry 12 (0-indexed: 11)
+    app.handle_event(make_event("1"));
+    app.handle_event(make_event("2"));
+    app.handle_event(make_event("g"));
+    if let AppMode::BrowsingHistory(ref b) = app.mode {
+        assert_eq!(b.selected, 11);
+    } else {
+        panic!("expected BrowsingHistory mode");
+    }
+}
+
+#[tokio::test]
+async fn test_history_browser_count_prefix_clamps_to_end() {
+    let mut app = make_history_browser(5);
+    // "99g" should clamp to last entry (index 4)
+    app.handle_event(make_event("9"));
+    app.handle_event(make_event("9"));
+    app.handle_event(make_event("g"));
+    if let AppMode::BrowsingHistory(ref b) = app.mode {
+        assert_eq!(b.selected, 4);
+    } else {
+        panic!("expected BrowsingHistory mode");
+    }
+}
+
+#[tokio::test]
+async fn test_history_browser_count_j_moves_multiple() {
+    let mut app = make_history_browser(10);
+    // "3j" moves down 3
+    app.handle_event(make_event("3"));
+    app.handle_event(make_event("j"));
+    if let AppMode::BrowsingHistory(ref b) = app.mode {
+        assert_eq!(b.selected, 3);
+    } else {
+        panic!("expected BrowsingHistory mode");
+    }
+}
+
+#[tokio::test]
+async fn test_history_browser_count_k_moves_multiple() {
+    let mut app = make_history_browser(10);
+    // Go to bottom first
+    app.handle_event(make_event("Shift+G"));
+    // "4k" moves up 4 from index 9 -> index 5
+    app.handle_event(make_event("4"));
+    app.handle_event(make_event("k"));
+    if let AppMode::BrowsingHistory(ref b) = app.mode {
+        assert_eq!(b.selected, 5);
+    } else {
+        panic!("expected BrowsingHistory mode");
+    }
+}
+
+#[tokio::test]
+async fn test_history_browser_esc_closes() {
+    let mut app = make_history_browser(5);
+    app.handle_event(make_event("Esc"));
+    assert!(matches!(app.mode, AppMode::Normal));
+}
+
+#[tokio::test]
+async fn test_history_browser_q_closes() {
+    let mut app = make_history_browser(5);
+    app.handle_event(make_event("q"));
+    assert!(matches!(app.mode, AppMode::Normal));
+}
+
+#[tokio::test]
+async fn test_history_browser_delete_shows_confirm() {
+    let mut app = make_history_browser(5);
+    app.handle_event(make_event("x"));
+    if let AppMode::BrowsingHistory(ref b) = app.mode {
+        assert!(b.confirming_delete);
+    } else {
+        panic!("expected BrowsingHistory mode");
+    }
+}
+
+#[tokio::test]
+async fn test_history_browser_delete_cancel() {
+    let mut app = make_history_browser(5);
+    app.handle_event(make_event("x"));
+    // Cancel with 'n'
+    app.handle_event(make_event("n"));
+    if let AppMode::BrowsingHistory(ref b) = app.mode {
+        assert!(!b.confirming_delete);
+        assert_eq!(b.entries.len(), 5);
+    } else {
+        panic!("expected BrowsingHistory mode");
+    }
+}
+
+#[tokio::test]
+async fn test_history_browser_delete_confirm_removes_entry() {
+    let mut app = make_history_browser(5);
+    app.handle_event(make_event("x"));
+    app.handle_event(make_event("y"));
+    if let AppMode::BrowsingHistory(ref b) = app.mode {
+        assert_eq!(b.entries.len(), 4);
+        assert!(!b.confirming_delete);
+    } else {
+        panic!("expected BrowsingHistory mode");
+    }
+}
+
+#[tokio::test]
+async fn test_history_browser_enter_loads_pipeline() {
+    let mut app = make_history_browser(3);
+    app.handle_event(make_event("j")); // select entry 1 ("cmd1")
+    app.handle_event(make_event("Enter"));
+    assert!(matches!(app.mode, AppMode::Normal));
+    assert_eq!(app.pipeline.stages[0].command, "cmd1");
+}
