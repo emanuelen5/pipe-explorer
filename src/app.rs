@@ -67,6 +67,8 @@ pub struct HistoryBrowser {
     pub selected: usize,
     /// If true, showing a confirmation prompt for deletion.
     pub confirming_delete: bool,
+    /// Accumulated numeric prefix for vim-style `Ng` navigation.
+    pub count_prefix: Option<usize>,
 }
 
 /// A request sent to the long-lived background executor task.
@@ -1142,6 +1144,7 @@ impl App {
             entries: history.entries,
             selected: 0,
             confirming_delete: false,
+            count_prefix: None,
         });
     }
 
@@ -1182,30 +1185,48 @@ impl App {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.mode = AppMode::Normal;
             }
+            // Accumulate digits for vim-style count prefix.
+            KeyCode::Char(c @ '0'..='9') => {
+                let digit = (c as usize) - ('0' as usize);
+                browser.count_prefix = Some(browser.count_prefix.unwrap_or(0) * 10 + digit);
+            }
             KeyCode::Down | KeyCode::Char('j') => {
-                if !browser.entries.is_empty() && browser.selected + 1 < browser.entries.len() {
-                    browser.selected += 1;
+                let count = browser.count_prefix.take().unwrap_or(1);
+                if !browser.entries.is_empty() {
+                    browser.selected = (browser.selected + count).min(browser.entries.len() - 1);
                 }
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                if browser.selected > 0 {
-                    browser.selected -= 1;
-                }
+                let count = browser.count_prefix.take().unwrap_or(1);
+                browser.selected = browser.selected.saturating_sub(count);
             }
             KeyCode::Home | KeyCode::Char('g') => {
-                browser.selected = 0;
+                // With a count prefix, `Ng` goes to entry N (1-indexed).
+                if let Some(n) = browser.count_prefix.take() {
+                    if n > 0 && !browser.entries.is_empty() {
+                        browser.selected = (n - 1).min(browser.entries.len() - 1);
+                    }
+                } else {
+                    browser.selected = 0;
+                }
             }
             KeyCode::End | KeyCode::Char('G') => {
-                if !browser.entries.is_empty() {
+                if let Some(n) = browser.count_prefix.take() {
+                    if n > 0 && !browser.entries.is_empty() {
+                        browser.selected = (n - 1).min(browser.entries.len() - 1);
+                    }
+                } else if !browser.entries.is_empty() {
                     browser.selected = browser.entries.len() - 1;
                 }
             }
             KeyCode::Delete | KeyCode::Char('x') => {
+                browser.count_prefix = None;
                 if !browser.entries.is_empty() {
                     browser.confirming_delete = true;
                 }
             }
             KeyCode::Enter => {
+                browser.count_prefix = None;
                 // Load the selected pipeline and close the browser.
                 if let Some(entry) = browser.entries.get(browser.selected) {
                     let stages: Vec<PipeStage> = entry

@@ -745,7 +745,8 @@ fn render_history_browser(frame: &mut Frame, browser: &HistoryBrowser, area: Rec
         .take(max_visible)
         .map(|(i, entry)| {
             let pipeline_str = entry.commands.join(" | ");
-            let label = format!("{:>3}  {}", i + 1, pipeline_str);
+            let date_str = format_timestamp(entry.timestamp);
+            let label = format!("{:>3}  {}  {}", i + 1, date_str, pipeline_str);
             // Truncate to fit width.
             let display: String = if label.len() > inner_width {
                 format!("{}…", &label[..inner_width.saturating_sub(1)])
@@ -766,6 +767,23 @@ fn render_history_browser(frame: &mut Frame, browser: &HistoryBrowser, area: Rec
 
     let list = List::new(items).block(block);
     frame.render_widget(list, dialog_area);
+}
+
+/// Format a Unix timestamp (seconds) into a short date string like "2026-08-12 14:30".
+fn format_timestamp(ts: u64) -> String {
+    use time::OffsetDateTime;
+    let utc = OffsetDateTime::from_unix_timestamp(ts as i64).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+    let local = utc
+        .checked_to_offset(time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC))
+        .unwrap_or(utc);
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        local.year(),
+        local.month() as u8,
+        local.day(),
+        local.hour(),
+        local.minute()
+    )
 }
 
 /// Render a simple list of keybindings for the help overlay.
