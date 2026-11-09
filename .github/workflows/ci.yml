@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# Default to read-only access for the GITHUB_TOKEN. Jobs that need more
+# (e.g. release-nightly) request it explicitly at the job level.
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
     name: Build and Test
