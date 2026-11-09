@@ -42,3 +42,23 @@ git switch my-branch && cargo bench -- --baseline main
 Criterion then reports the change for every benchmark and flags the
 statistically significant ones.
 
+## In CI
+
+The Benchmarks workflow (`.github/workflows/benchmarks.yml`) has two jobs:
+
+- **Build benchmarks** compiles them on every push and pull request, so they
+  keep up with changes to the code.
+- **Compare with base branch** runs on pull requests. It benchmarks the
+  base branch and then the pull request on the same runner, and fails if a
+  benchmark got more than 15% slower. The job summary lists the benchmarks
+  that got slower or faster. `executor` is left out because it is too noisy
+  on shared runners.
+
+Both runs use the pull request's benchmark code, so new and changed
+benchmarks are compared as well. A benchmark that uses code the pull
+request adds can't be built against the base branch. The summary lists
+those as not compared.
+
+Shared runners are noisy enough that the comparison can occasionally fail
+without a real regression, and smaller regressions go unnoticed. Rerun the
+job, or confirm locally with the baseline commands above.

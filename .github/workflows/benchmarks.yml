@@ -1,0 +1,147 @@
+name: Benchmarks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A newer push to the same pull request makes a running comparison pointless.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Build benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-bench-
+
+      - name: Build benchmarks
+        run: cargo bench --no-run
+
+  # Benchmarks the base branch and the PR one after the other on the same
+  # runner, and fails if a benchmark got slower by more than NOISE_THRESHOLD.
+  # Shared runners are noisy, so small regressions are not caught.
+  #
+  # Both runs use the PR's benchmark code, so new and changed benchmarks are
+  # compared too. A benchmark target that doesn't build or run against the
+  # base branch (e.g. because it uses code added in the PR) is reported as
+  # not compared.
+  compare:
+    name: Compare with base branch
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      # `executor` spawns processes and is too noisy to compare on shared runners.
+      BENCHES: ansi output search render
+      BENCH_ARGS: --warm-up-time 1 --measurement-time 3
+      NOISE_THRESHOLD: "0.15"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The PR merge commit and its first parent, the base branch.
+          fetch-depth: 2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Restore only: the comparison leaves results in target/criterion that
+      # should not end up in the cache. `build` saves it.
+      - name: Restore Cargo registry and build artifacts
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-bench-
+
+      - name: Benchmark base
+        shell: bash
+        run: |
+          # The base branch's code with the PR's benchmarks.
+          git checkout --quiet --detach HEAD^1
+          git checkout --quiet "$GITHUB_SHA" -- benches Cargo.toml Cargo.lock
+          for bench in $BENCHES; do
+            if ! cargo bench --bench "$bench" -- $BENCH_ARGS --save-baseline base; then
+              echo "::warning::Benchmark target '$bench' does not build or run against the base branch, so it is not compared."
+            fi
+          done
+
+      - name: Benchmark PR
+        shell: bash
+        run: |
+          git checkout --quiet --force --detach "$GITHUB_SHA"
+          args=()
+          for bench in $BENCHES; do
+            args+=(--bench "$bench")
+          done
+          cargo bench "${args[@]}" -- $BENCH_ARGS \
+            --baseline-lenient base --noise-threshold "$NOISE_THRESHOLD" | tee bench.txt
+
+      - name: Check for regressions
+        shell: bash
+        run: |
+          # Criterion prints each benchmark's name at the start of a line,
+          # followed by its verdict ("Performance has regressed.") further down.
+          verdicts() {
+            awk -v verdict="$1" '/^[a-z][^ ]*\//{name=$1} index($0, verdict){print name}' bench.txt
+          }
+          regressed=$(verdicts "Performance has regressed.")
+          improved=$(verdicts "Performance has improved.")
+          # Benchmarks without a "change:" block had no baseline to compare with.
+          not_compared=$(awk '
+            /^[a-z][^ ]*\// { if (name != "" && !compared) print name; name = $1; compared = 0 }
+            /^ +change:/    { compared = 1 }
+            END             { if (name != "" && !compared) print name }
+          ' bench.txt)
+          threshold=$(awk -v t="$NOISE_THRESHOLD" 'BEGIN { print t * 100 "%" }')
+          as_list() { sed 's/.*/- `&`/'; }
+          {
+            echo "## Benchmarks compared with the base branch"
+            echo
+            if ! grep -q "change:" bench.txt; then
+              echo "Nothing was compared: none of the benchmarks build against the base branch."
+            else
+              if [ -z "$regressed" ]; then
+                echo "No benchmark got more than $threshold slower."
+              else
+                echo "More than $threshold slower:"
+                echo "$regressed" | as_list
+              fi
+              if [ -n "$improved" ]; then
+                echo
+                echo "More than $threshold faster:"
+                echo "$improved" | as_list
+              fi
+              if [ -n "$not_compared" ]; then
+                echo
+                echo "Not compared, because they don't build or run against the base branch:"
+                echo "$not_compared" | as_list
+              fi
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$regressed" ]; then
+            echo "::error::Benchmarks more than $threshold slower than the base branch:" $regressed
+            exit 1
+          fi
