@@ -378,3 +378,64 @@ fn no_line_index_for_combined_mode() {
     let out = StageOutput::empty();
     assert!(out.line_index(OutputMode::Combined).is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Streaming execution
+// ---------------------------------------------------------------------------
+
+/// Drain `rx` into (stage_idx -> stdout) and return whether AllDone was seen.
+fn collect_streaming(rx: &std_mpsc::Receiver<StreamMsg>) -> (HashMap<usize, Vec<u8>>, bool) {
+    let mut outs: HashMap<usize, Vec<u8>> = HashMap::new();
+    let mut all_done = false;
+    for msg in rx.try_iter() {
+        match msg {
+            StreamMsg::StageUpdate {
+                stage_idx,
+                new_stdout,
+                ..
+            } => outs.entry(stage_idx).or_default().extend(new_stdout),
+            StreamMsg::StageDone { stage_idx, .. } => {
+                outs.entry(stage_idx).or_default();
+            }
+            StreamMsg::AllDone { .. } => all_done = true,
+        }
+    }
+    (outs, all_done)
+}
+
+/// Cancelling a streaming run must kill already-spawned children instead of
+/// waiting for them to exit on their own.  Otherwise the (sequential) executor
+/// is blocked and the next run cannot start until the old processes finish.
+#[test]
+fn streaming_cancel_kills_running_children() {
+    let mut cache = ExecutorCache::new();
+    let commands = vec!["sleep 5".to_string(), "cat".to_string()];
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = std_mpsc::channel();
+
+    let cancel_c = cancel.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        cancel_c.store(true, Ordering::Relaxed);
+    });
+
+    let start = Instant::now();
+    run_pipeline_streaming(
+        &mut cache,
+        &commands,
+        commands.len() - 1,
+        false,
+        &[],
+        &[],
+        &cancel,
+        &tx,
+    );
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "cancelled run should return promptly, took {elapsed:?}"
+    );
+    let (_, all_done) = collect_streaming(&rx);
+    assert!(all_done, "AllDone must be sent after cancellation");
+}

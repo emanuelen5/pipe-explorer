@@ -608,6 +608,44 @@ fn extract_relay_bytes(output: &StageOutput, mode: OutputMode) -> Vec<u8> {
     }
 }
 
+/// How often a waiting executor re-checks its cancel flag.
+const CANCEL_POLL: Duration = Duration::from_millis(10);
+
+/// A stage whose child process has been spawned by [`run_pipeline_streaming`].
+struct LiveStage {
+    child: std::process::Child,
+    collector: std::thread::JoinHandle<Option<StageOutput>>,
+}
+
+/// Kill and reap every child process that is still running.
+fn kill_all(live: &mut [Option<LiveStage>]) {
+    for ls in live.iter_mut().flatten() {
+        let _ = ls.child.kill();
+        let _ = ls.child.wait();
+    }
+}
+
+/// Wait for `child` to exit, giving up early if `cancel` is set.
+///
+/// Returns `Some(exit_code)` when the child exited, or `None` when the run was
+/// cancelled first.  The child is *not* killed here; the caller decides.
+fn wait_unless_cancelled(
+    child: &mut std::process::Child,
+    cancel: &AtomicBool,
+) -> Option<Option<i32>> {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status.code()),
+            Ok(None) => {}
+            Err(_) => return Some(None),
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        std::thread::sleep(CANCEL_POLL);
+    }
+}
+
 /// Run the pipeline with true concurrent streaming between stages.
 ///
 /// Stages are spawned as concurrent OS processes. Data flows from stage N's
@@ -615,8 +653,9 @@ fn extract_relay_bytes(output: &StageOutput, mode: OutputMode) -> Vec<u8> {
 /// time. UI update messages are throttled to at most one per [`UI_THROTTLE`]
 /// interval per stage.
 ///
-/// `cancel` can be set to `true` to abort execution — all child processes will
-/// be killed and threads will exit.
+/// `cancel` can be set to `true` to abort execution — all child processes are
+/// killed and this function returns promptly (within [`CANCEL_POLL`]), even if
+/// a child would otherwise keep running.
 ///
 /// Cache behaviour: before spawning processes, we check the cache sequentially
 /// (since each key depends on the previous stage's full output hash). Cached
@@ -705,19 +744,12 @@ pub fn run_pipeline_streaming(
     // Save initial_stdin for caching before we move it.
     let initial_stdin_for_cache = initial_stdin.clone();
 
-    struct LiveStage {
-        child: std::process::Child,
-        collector: std::thread::JoinHandle<Option<StageOutput>>,
-    }
-
     let mut live: Vec<Option<LiveStage>> = Vec::with_capacity(stream_count);
 
     for j in 0..stream_count {
         let i = miss_idx + j;
         if cancel.load(Ordering::Relaxed) {
-            for ls in live.iter_mut().flatten() {
-                let _ = ls.child.kill();
-            }
+            kill_all(&mut live);
             let _ = ui_tx.send(StreamMsg::AllDone {
                 error: Some("cancelled".to_string()),
             });
@@ -728,9 +760,7 @@ pub fn run_pipeline_streaming(
         let mut child = match spawn_shell(&commands[i], &opts) {
             Ok(c) => c,
             Err(e) => {
-                for ls in live.iter_mut().flatten() {
-                    let _ = ls.child.kill();
-                }
+                kill_all(&mut live);
                 let _ = ui_tx.send(StreamMsg::AllDone {
                     error: Some(format!("stage {}: {}", i, e)),
                 });
@@ -870,24 +900,34 @@ pub fn run_pipeline_streaming(
     // ------------------------------------------------------------------
     let mut prev_stdin = initial_stdin_for_cache;
 
-    for (j, slot) in live.iter_mut().enumerate() {
+    for j in 0..live.len() {
         let i = miss_idx + j;
-        if let Some(mut ls) = slot.take() {
-            let exit_code = ls.child.wait().ok().and_then(|s| s.code());
-            let mut output = ls.collector.join().ok().flatten();
-
-            if let Some(ref mut out) = output {
-                out.exit_code = exit_code;
-                cache.store(&commands[i], &prev_stdin, out.clone());
-                let mode = output_modes.get(i).copied().unwrap_or(OutputMode::Stdout);
-                prev_stdin = extract_relay_bytes(out, mode);
-            }
-
-            let _ = ui_tx.send(StreamMsg::StageDone {
-                stage_idx: i,
-                exit_code,
+        let Some(mut ls) = live[j].take() else {
+            continue;
+        };
+        // Poll rather than block in `wait()` so a cancelled run kills its
+        // children right away instead of waiting for them to exit.
+        let Some(exit_code) = wait_unless_cancelled(&mut ls.child, cancel) else {
+            live[j] = Some(ls);
+            kill_all(&mut live);
+            let _ = ui_tx.send(StreamMsg::AllDone {
+                error: Some("cancelled".to_string()),
             });
+            return;
+        };
+        let mut output = ls.collector.join().ok().flatten();
+
+        if let Some(ref mut out) = output {
+            out.exit_code = exit_code;
+            cache.store(&commands[i], &prev_stdin, out.clone());
+            let mode = output_modes.get(i).copied().unwrap_or(OutputMode::Stdout);
+            prev_stdin = extract_relay_bytes(out, mode);
         }
+
+        let _ = ui_tx.send(StreamMsg::StageDone {
+            stage_idx: i,
+            exit_code,
+        });
     }
 
     let _ = ui_tx.send(StreamMsg::AllDone { error: None });

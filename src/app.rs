@@ -95,7 +95,7 @@ pub struct App {
     pub mode: AppMode,
     /// Per-stage view state (output mode, search, scroll).
     pub stage_views: Vec<StageViewState>,
-    /// Cached outputs per stage (only up to the currently selected stage).
+    /// Outputs for every stage of the pipeline.
     /// During streaming, entries are incrementally filled in.
     pub stage_outputs: Vec<StageOutput>,
     /// Error message to display (e.g. command failed).
@@ -201,7 +201,11 @@ impl App {
         }
     }
 
-    /// Trigger asynchronous execution of stages up to and including `selected`.
+    /// Trigger asynchronous execution of the whole pipeline.
+    ///
+    /// Every stage runs regardless of which one is selected, so switching the
+    /// selected stage never needs to restart anything.  Stages whose command and
+    /// stdin are unchanged are served from the executor cache.
     ///
     /// Cancels any in-flight execution, creates a fresh result channel, and
     /// pre-fills `stage_outputs` with empty placeholders so incremental
@@ -223,7 +227,7 @@ impl App {
         self.exec_rx = tokio_rx;
 
         // Pre-fill stage_outputs with empty entries for incremental building.
-        let count = (self.pipeline.selected + 1).min(self.pipeline.len());
+        let count = self.pipeline.len();
         self.stage_outputs = (0..count).map(|_| StageOutput::empty()).collect();
         // Reset per-stage activity timestamps for the new execution.
         for stage in &mut self.pipeline.stages {
@@ -238,7 +242,7 @@ impl App {
             .iter()
             .map(|s| s.command.clone())
             .collect();
-        let up_to = self.pipeline.selected;
+        let up_to = count - 1;
         let output_modes: Vec<OutputMode> =
             self.stage_views.iter().map(|v| v.output_mode).collect();
         let stage_options: Vec<StageOptions> = self
@@ -346,22 +350,22 @@ impl App {
 
     /// Change the output mode of a given stage.
     ///
-    /// When the mode changes for stage `stage_idx`, any downstream stage outputs
-    /// are invalidated (truncated) because their stdin will differ.  The executor-
-    /// level cache still keeps previous results keyed by `(command, sha256(stdin))`,
-    /// so switching back to a previously-used mode will be a cache hit.
+    /// The output mode also selects which stream is piped into the next stage,
+    /// so when it changes on a non-last stage the pipeline is re-executed to
+    /// refresh the downstream stages.  Stages that already finished are served
+    /// from the executor cache (keyed by `(command, sha256(stdin))`), so this
+    /// only re-runs what is downstream of `stage_idx`.
     pub fn set_output_mode(&mut self, stage_idx: usize, mode: OutputMode) {
         // Ensure stage_views is large enough.
         while self.stage_views.len() <= stage_idx {
             self.stage_views.push(StageViewState::default());
         }
+        let changed = self.stage_views[stage_idx].output_mode != mode;
         self.stage_views[stage_idx].output_mode = mode;
         self.stage_views[stage_idx].scroll = 0;
 
-        // Invalidate downstream stage outputs: keep only up to stage_idx (inclusive).
-        let keep = stage_idx + 1;
-        if self.stage_outputs.len() > keep {
-            self.stage_outputs.truncate(keep);
+        if changed && stage_idx + 1 < self.pipeline.len() {
+            self.trigger_exec(false);
         }
 
         self.compute_search_matches();
@@ -924,10 +928,11 @@ impl App {
         }
 
         match key.code {
-            // Navigation between stages
+            // Navigation between stages.  Every execution covers the whole
+            // pipeline, so this only re-executes if the stage somehow has no
+            // output slot (e.g. a stage that was added but never run).
             KeyCode::Right | KeyCode::Char('l') => {
                 self.pipeline.select_next();
-                // Only trigger execution if this stage's output isn't already cached.
                 if self.pipeline.selected >= self.stage_outputs.len() {
                     self.trigger_exec(false);
                 }
@@ -935,7 +940,6 @@ impl App {
             }
             KeyCode::Left | KeyCode::Char('h') => {
                 self.pipeline.select_prev();
-                // Only trigger execution if this stage's output isn't already cached.
                 if self.pipeline.selected >= self.stage_outputs.len() {
                     self.trigger_exec(false);
                 }

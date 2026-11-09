@@ -197,14 +197,69 @@ async fn test_error_status_preserved_after_navigate_left() {
     assert_eq!(app.stage_outputs.len(), 3);
 }
 
-/// Changing output mode on stage 0 invalidates downstream stage_outputs so that
-/// following stages will recalculate with the newly selected input stream.
+/// Drive the app's stream channel until the current execution finishes.
+async fn run_to_completion(app: &mut App) {
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while app.running {
+            match app.exec_rx.recv().await {
+                Some(msg) => {
+                    app.handle_stream_msg(msg);
+                }
+                None => break,
+            }
+        }
+    })
+    .await;
+    assert!(result.is_ok(), "pipeline did not finish in time");
+}
+
+/// Stages after the selected one are executed too, not just up to the
+/// selection.
 #[tokio::test]
-async fn test_set_output_mode_invalidates_downstream_outputs() {
+async fn test_exec_runs_stages_after_selected() {
+    let pipeline = parse_pipeline("echo a | tr a b | tr b c");
+    let mut app = App::new(pipeline);
+    app.pipeline.selected = 0;
+
+    app.trigger_exec(false);
+    assert_eq!(app.stage_outputs.len(), 3);
+    run_to_completion(&mut app).await;
+
+    assert_eq!(app.stage_outputs[0].stdout_str(), "a\n");
+    assert_eq!(app.stage_outputs[1].stdout_str(), "b\n");
+    assert_eq!(app.stage_outputs[2].stdout_str(), "c\n");
+    assert_eq!(app.stage_outputs[2].exit_code, Some(0));
+}
+
+/// Moving the selection while the pipeline is still running must not cancel
+/// and restart it.
+#[tokio::test]
+async fn test_navigate_while_running_does_not_restart() {
+    let pipeline = parse_pipeline("echo a | cat | cat");
+    let mut app = App::new(pipeline);
+    app.pipeline.selected = 0;
+    app.trigger_exec(false);
+    let token = app.cancel_token.clone();
+
+    app.handle_event(make_key(KeyCode::Right));
+    app.handle_event(make_key(KeyCode::Right));
+    app.handle_event(make_key(KeyCode::Left));
+
+    assert_eq!(app.pipeline.selected, 1);
+    assert!(
+        !token.load(Ordering::Relaxed),
+        "navigation must not cancel the running pipeline"
+    );
+    assert!(Arc::ptr_eq(&token, &app.cancel_token));
+}
+
+/// Changing output mode on a non-last stage re-executes the pipeline right
+/// away so downstream stages see the newly selected stream.
+#[tokio::test]
+async fn test_set_output_mode_reexecutes_downstream() {
     let pipeline = parse_pipeline("echo a | echo b | echo c");
     let mut app = App::new(pipeline);
 
-    // All three stages have been executed.
     app.stage_outputs = vec![
         make_stage_output("a\n"),
         make_stage_output("b\n"),
@@ -212,38 +267,28 @@ async fn test_set_output_mode_invalidates_downstream_outputs() {
     ];
     app.pipeline.selected = 0;
 
-    // Change mode on stage 0 → should invalidate stages 1 and 2.
     app.set_output_mode(app.pipeline.selected, OutputMode::Stderr);
 
     assert_eq!(app.stage_views[0].output_mode, OutputMode::Stderr);
-    // Only stage 0's output remains; downstream outputs are purged.
-    assert_eq!(app.stage_outputs.len(), 1);
+    assert!(app.running, "downstream stages must be re-executed");
+    assert_eq!(app.stage_outputs.len(), 3);
 }
 
-/// After changing output mode, navigating right triggers re-execution of
-/// the now-invalidated downstream stage.
+/// Downstream stages are refreshed with the newly selected stream.
 #[tokio::test]
-async fn test_output_mode_change_causes_downstream_reexec_on_navigate() {
-    let pipeline = parse_pipeline("echo a | echo b");
+async fn test_set_output_mode_pipes_new_stream_downstream() {
+    let pipeline = parse_pipeline("echo out; echo err >&2 | cat");
     let mut app = App::new(pipeline);
+    app.trigger_exec(false);
+    run_to_completion(&mut app).await;
+    assert_eq!(app.stage_outputs[1].stdout_str(), "out\n");
 
-    app.stage_outputs = vec![make_stage_output("a\n"), make_stage_output("b\n")];
-    app.pipeline.selected = 0;
-
-    // Change mode: stage 1's inputs might now differ.
-    app.set_output_mode(app.pipeline.selected, OutputMode::Stderr);
-
-    // Navigate right: stage 1 is no longer in stage_outputs → exec is triggered.
-    app.handle_event(make_key(KeyCode::Right));
-
-    assert_eq!(app.pipeline.selected, 1);
-    assert!(
-        app.running,
-        "execution must be triggered for the invalidated downstream stage"
-    );
+    app.set_output_mode(0, OutputMode::Stderr);
+    run_to_completion(&mut app).await;
+    assert_eq!(app.stage_outputs[1].stdout_str(), "err\n");
 }
 
-/// Changing output mode on the last stage does not purge any outputs since
+/// Changing output mode on the last stage does not re-execute anything since
 /// there are no downstream stages.
 #[tokio::test]
 async fn test_set_output_mode_on_last_stage_preserves_all_outputs() {
@@ -255,77 +300,45 @@ async fn test_set_output_mode_on_last_stage_preserves_all_outputs() {
 
     app.set_output_mode(app.pipeline.selected, OutputMode::Stderr);
 
-    // Both outputs must still be present because stage 1 is the last stage.
     assert_eq!(app.stage_outputs.len(), 2);
     assert_eq!(app.stage_views[1].output_mode, OutputMode::Stderr);
+    assert!(!app.running);
 }
 
-/// Switching output mode back and forth truncates downstream outputs every
-/// time, even when returning to the original mode.  This ensures the UI
-/// always triggers re-execution (which will be a cache hit in the background
-/// executor).
+/// Re-selecting the mode a stage already has does not re-execute.
 #[tokio::test]
-async fn test_switch_mode_back_and_forth_truncates_each_time() {
-    let pipeline = parse_pipeline("echo a | cat | wc -c");
-    let mut app = App::new(pipeline);
-
-    app.stage_outputs = vec![
-        make_stage_output("a\n"),
-        make_stage_output("a\n"),
-        make_stage_output("2\n"),
-    ];
-    app.pipeline.selected = 0;
-
-    // Switch to stderr → downstream truncated.
-    app.set_output_mode(0, OutputMode::Stderr);
-    assert_eq!(app.stage_outputs.len(), 1);
-
-    // Pretend stages 1-2 were re-executed with stderr input.
-    app.stage_outputs = vec![
-        make_stage_output("a\n"),
-        make_stage_output(""),
-        make_stage_output("0\n"),
-    ];
-
-    // Switch back to stdout → downstream truncated again.
-    app.set_output_mode(0, OutputMode::Stdout);
-    assert_eq!(app.stage_outputs.len(), 1);
-    assert_eq!(app.stage_views[0].output_mode, OutputMode::Stdout);
-}
-
-/// After switching output mode back to the original, navigating to a
-/// downstream stage triggers re-execution.  The background executor's
-/// cache (keyed by command + sha256(stdin)) still holds the old result,
-/// so this will be a cache hit — no actual subprocess is spawned.
-#[tokio::test]
-async fn test_switch_mode_back_triggers_reexec_for_cache_hit() {
+async fn test_set_same_output_mode_does_not_reexecute() {
     let pipeline = parse_pipeline("echo a | cat");
     let mut app = App::new(pipeline);
 
     app.stage_outputs = vec![make_stage_output("a\n"), make_stage_output("a\n")];
-    app.pipeline.selected = 0;
-
-    // Switch to stderr (truncates downstream).
-    app.set_output_mode(0, OutputMode::Stderr);
-    assert_eq!(app.stage_outputs.len(), 1);
-
-    // Switch back to stdout (truncates downstream again).
     app.set_output_mode(0, OutputMode::Stdout);
-    assert_eq!(app.stage_outputs.len(), 1);
 
-    // Navigate right: stage 1 is missing from stage_outputs → exec triggered.
-    app.handle_event(make_key(KeyCode::Right));
-    assert_eq!(app.pipeline.selected, 1);
-    assert!(
-        app.running,
-        "execution must be triggered so the executor cache can serve the result"
-    );
+    assert!(!app.running);
+    assert_eq!(app.stage_outputs[1].stdout_str(), "a\n");
 }
 
-/// Pressing 'm' to cycle output mode on a non-last stage truncates
-/// downstream outputs, just like calling set_output_mode directly.
+/// Switching output mode back and forth re-executes every time, including
+/// when returning to the original mode (a cache hit in the executor).
 #[tokio::test]
-async fn test_key_m_cycles_mode_and_invalidates_downstream() {
+async fn test_switch_mode_back_and_forth_reexecutes_each_time() {
+    let pipeline = parse_pipeline("echo a | cat | wc -c");
+    let mut app = App::new(pipeline);
+    app.pipeline.selected = 0;
+
+    app.set_output_mode(0, OutputMode::Stderr);
+    assert!(app.running);
+
+    app.running = false;
+    app.set_output_mode(0, OutputMode::Stdout);
+    assert!(app.running);
+    assert_eq!(app.stage_views[0].output_mode, OutputMode::Stdout);
+}
+
+/// Pressing 'm' to cycle output mode on a non-last stage re-executes the
+/// downstream stages, just like calling set_output_mode directly.
+#[tokio::test]
+async fn test_key_m_cycles_mode_and_reexecutes_downstream() {
     let pipeline = parse_pipeline("echo a | cat | wc -c");
     let mut app = App::new(pipeline);
 
@@ -336,10 +349,10 @@ async fn test_key_m_cycles_mode_and_invalidates_downstream() {
     ];
     app.pipeline.selected = 0;
 
-    // Press 'm' → Stdout → Stderr, downstream truncated.
+    // Press 'm' → Stdout → Stderr, downstream re-executed.
     app.handle_event(make_key(KeyCode::Char('m')));
     assert_eq!(app.stage_views[0].output_mode, OutputMode::Stderr);
-    assert_eq!(app.stage_outputs.len(), 1);
+    assert!(app.running);
 }
 
 // ---------------------------------------------------------------
