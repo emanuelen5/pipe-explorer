@@ -264,16 +264,12 @@ fn render_output(frame: &mut Frame, app: &mut App, area: Rect) {
         String::new()
     };
 
-    // Extract immutable view state before we may need &mut app later.
+    // Extract immutable view state before we may need &mut app later.  Only
+    // small values are copied here; the (potentially huge) match list is
+    // borrowed further down, once the mutable work is done.
     let output_mode = app.view().output_mode;
-    let search_query = app.view().search.query.clone();
-    let search_matches: Vec<(usize, usize, usize)> = app
-        .view()
-        .search
-        .matches
-        .iter()
-        .map(|&(line, start, end)| (line, start, end))
-        .collect();
+    let search_active = !app.view().search.query.is_empty();
+    let search_match_count = app.view().search.matches.len();
     let search_match_idx = app.view().search.match_idx;
 
     let mode_label = match output_mode {
@@ -283,12 +279,12 @@ fn render_output(frame: &mut Frame, app: &mut App, area: Rect) {
     };
 
     // Include search match count when a search is active.
-    let search_span = if !search_query.is_empty() {
-        if search_matches.is_empty() {
+    let search_span = if search_active {
+        if search_match_count == 0 {
             Span::styled(" [no matches]", Style::default().fg(Color::Red))
         } else {
             Span::styled(
-                format!(" [{}/{}]", search_match_idx + 1, search_matches.len()),
+                format!(" [{}/{}]", search_match_idx + 1, search_match_count),
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
@@ -339,10 +335,12 @@ fn render_output(frame: &mut Frame, app: &mut App, area: Rect) {
     let scroll = app.view().scroll.min(max_scroll);
     app.view_mut().scroll = scroll;
 
+    // Everything below only reads app state.
+    let app = &*app;
     let raw_content = app.current_output_text();
+    let search_matches = &app.view().search.matches;
 
-    // Build search highlight map (only entries in the visible window matter,
-    // but we provide the full map — the windowed parser skips invisible lines).
+    // Build search highlight map for the matches in the visible window only.
     let line_match_map = if !search_matches.is_empty() {
         let mut map: std::collections::HashMap<usize, Vec<(usize, usize, bool)>> =
             std::collections::HashMap::new();
@@ -360,11 +358,11 @@ fn render_output(frame: &mut Frame, app: &mut App, area: Rect) {
     };
 
     // Only parse visible lines — skip ANSI content before `scroll`, stop
-    // after `visible_height` lines.  When a pre-built line index is
-    // available (stdout/stderr), phase 1 is skipped entirely via O(1) lookup.
+    // after `visible_height` lines.  The pre-built line index lets the
+    // parser skip phase 1 entirely via an O(1) lookup.
     let line_index = app.current_line_index();
     let mut lines = ansi_text_to_visible_lines(
-        &raw_content,
+        raw_content,
         scroll,
         visible_height,
         &line_match_map,
@@ -372,15 +370,15 @@ fn render_output(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 
     // In combined mode, prepend a 1-column margin indicating the source stream:
-    // a yellow "│" for stderr lines, a space for stdout lines.
-    // `stderr_map` has one entry per `CombinedLine` (== one entry per rendered line);
-    // `unwrap_or(false)` handles any transient mismatch (e.g. trailing empty lines).
-    let stderr_map = app.combined_stderr_map();
+    // a yellow ">" for stderr lines, a space for stdout lines.
+    // There is one `CombinedLine` per rendered line; a missing entry (e.g. the
+    // trailing empty line) is treated as stdout.
     if matches!(output_mode, OutputMode::Combined) {
+        let combined_lines = app.current_combined_lines();
         for (i, line) in lines.iter_mut().enumerate() {
             // Map from visible index back to the absolute line index.
             let abs_i = scroll + i;
-            let is_stderr = stderr_map.get(abs_i).copied().unwrap_or(false);
+            let is_stderr = combined_lines.get(abs_i).is_some_and(|cl| cl.is_stderr);
             if is_stderr {
                 for span in &mut line.spans {
                     if span.style.bg.is_none() {

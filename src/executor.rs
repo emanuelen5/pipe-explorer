@@ -42,6 +42,10 @@ pub struct StageOutput {
     stdout_text: String,
     /// Cached UTF-8 text for stderr (kept in sync with `stderr` bytes).
     stderr_text: String,
+    /// Cached UTF-8 text of all `combined` lines concatenated (kept in sync
+    /// with `combined`).  Each line is decoded on its own, so invalid UTF-8
+    /// never spans two lines.
+    combined_text: String,
     /// Running newline counts — updated incrementally by `append_data()`.
     stdout_newlines: usize,
     stderr_newlines: usize,
@@ -49,6 +53,7 @@ pub struct StageOutput {
     /// Pre-built line indexes for O(1) scroll seeking.
     stdout_line_index: AnsiLineIndex,
     stderr_line_index: AnsiLineIndex,
+    combined_line_index: AnsiLineIndex,
 }
 
 impl StageOutput {
@@ -72,6 +77,10 @@ impl StageOutput {
         stdout_line_index.extend(&stdout_text);
         let mut stderr_line_index = AnsiLineIndex::new();
         stderr_line_index.extend(&stderr_text);
+        let mut combined_text = String::new();
+        append_combined_text(&mut combined_text, &combined);
+        let mut combined_line_index = AnsiLineIndex::new();
+        combined_line_index.extend(&combined_text);
         Self {
             stdout,
             stderr,
@@ -79,11 +88,13 @@ impl StageOutput {
             combined,
             stdout_text,
             stderr_text,
+            combined_text,
             stdout_newlines,
             stderr_newlines,
             combined_newlines,
             stdout_line_index,
             stderr_line_index,
+            combined_line_index,
         }
     }
 
@@ -96,11 +107,13 @@ impl StageOutput {
             combined: Vec::new(),
             stdout_text: String::new(),
             stderr_text: String::new(),
+            combined_text: String::new(),
             stdout_newlines: 0,
             stderr_newlines: 0,
             combined_newlines: 0,
             stdout_line_index: AnsiLineIndex::new(),
             stderr_line_index: AnsiLineIndex::new(),
+            combined_line_index: AnsiLineIndex::new(),
         }
     }
 
@@ -126,6 +139,9 @@ impl StageOutput {
             .filter(|&&b| b == b'\n')
             .count();
 
+        // Extend the combined text cache before `new_combined` is moved below.
+        append_combined_text(&mut self.combined_text, &new_combined);
+
         // Append raw bytes.
         self.stdout.extend_from_slice(new_stdout);
         self.stderr.extend_from_slice(new_stderr);
@@ -138,26 +154,25 @@ impl StageOutput {
         // Extend line indexes (only scans the newly appended portion).
         self.stdout_line_index.extend(&self.stdout_text);
         self.stderr_line_index.extend(&self.stderr_text);
+        self.combined_line_index.extend(&self.combined_text);
     }
 
     /// Get the pre-built line index for the given output mode.
-    /// Returns `None` for Combined mode (no persistent index).
-    pub fn line_index(&self, mode: OutputMode) -> Option<&AnsiLineIndex> {
+    pub fn line_index(&self, mode: OutputMode) -> &AnsiLineIndex {
         match mode {
-            OutputMode::Stdout => Some(&self.stdout_line_index),
-            OutputMode::Stderr => Some(&self.stderr_line_index),
-            OutputMode::Combined => None,
+            OutputMode::Stdout => &self.stdout_line_index,
+            OutputMode::Stderr => &self.stderr_line_index,
+            OutputMode::Combined => &self.combined_line_index,
         }
     }
 
-    /// Cached UTF-8 text for stdout (zero-cost borrow).
-    pub fn stdout_text(&self) -> &str {
-        &self.stdout_text
-    }
-
-    /// Cached UTF-8 text for stderr (zero-cost borrow).
-    pub fn stderr_text(&self) -> &str {
-        &self.stderr_text
+    /// Cached UTF-8 text for the given output mode (zero-cost borrow).
+    pub fn text(&self, mode: OutputMode) -> &str {
+        match mode {
+            OutputMode::Stdout => &self.stdout_text,
+            OutputMode::Stderr => &self.stderr_text,
+            OutputMode::Combined => &self.combined_text,
+        }
     }
 
     #[cfg(test)]
@@ -243,6 +258,13 @@ fn append_text_incremental(text: &mut String, new_bytes: &[u8], full_buf: &[u8])
             // Rare: a multi-byte sequence straddles the chunk boundary.
             *text = String::from_utf8_lossy(full_buf).into_owned();
         }
+    }
+}
+
+/// Append the lossy UTF-8 decoding of each line in `lines` to `text`.
+fn append_combined_text(text: &mut String, lines: &[CombinedLine]) {
+    for line in lines {
+        text.push_str(&String::from_utf8_lossy(&line.content));
     }
 }
 

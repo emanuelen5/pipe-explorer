@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
@@ -17,7 +16,9 @@ use tokio::sync::mpsc;
 use crate::ansi::AnsiLineIndex;
 pub use crate::editor::{EditorKeyResult, EditorState};
 pub use crate::executor::OutputMode;
-use crate::executor::{ExecutorCache, StageOutput, StreamMsg, run_pipeline_streaming};
+use crate::executor::{
+    CombinedLine, ExecutorCache, StageOutput, StreamMsg, run_pipeline_streaming,
+};
 use crate::history::History;
 use crate::pipeline::{PipeStage, Pipeline, StageOptions};
 use crate::search::{SearchHistory, SearchState};
@@ -486,32 +487,21 @@ impl App {
 
     /// Return the text to display in the output pager.
     ///
-    /// Returns a `Cow<str>` to avoid allocating when possible (stdout/stderr
-    /// are borrowed directly from the byte buffers when they're valid UTF-8).
-    pub fn current_output_text(&self) -> Cow<'_, str> {
+    /// Borrowed from the stage output's cached text, so this is free to call
+    /// on every frame regardless of how much output there is.
+    pub fn current_output_text(&self) -> &str {
         if self.pipeline.is_empty() || self.stage_outputs.is_empty() {
-            return Cow::Borrowed("");
+            return "";
         }
         let idx = self
             .pipeline
             .selected
             .min(self.stage_outputs.len().saturating_sub(1));
-        let out = &self.stage_outputs[idx];
-        match self.view().output_mode {
-            OutputMode::Stdout => Cow::Borrowed(out.stdout_text()),
-            OutputMode::Stderr => Cow::Borrowed(out.stderr_text()),
-            OutputMode::Combined => Cow::Owned(
-                out.combined
-                    .iter()
-                    .map(|l| String::from_utf8_lossy(&l.content))
-                    .collect::<Vec<_>>()
-                    .concat(),
-            ),
-        }
+        self.stage_outputs[idx].text(self.view().output_mode)
     }
 
     /// Get the pre-built ANSI line index for the current output.
-    /// Returns `None` for Combined mode or when no output exists.
+    /// Returns `None` when no output exists.
     pub fn current_line_index(&self) -> Option<&AnsiLineIndex> {
         if self.pipeline.is_empty() || self.stage_outputs.is_empty() {
             return None;
@@ -520,25 +510,20 @@ impl App {
             .pipeline
             .selected
             .min(self.stage_outputs.len().saturating_sub(1));
-        self.stage_outputs[idx].line_index(self.view().output_mode)
+        Some(self.stage_outputs[idx].line_index(self.view().output_mode))
     }
 
-    /// Returns a vector of booleans (one per line of `current_output_text()`) indicating
-    /// whether each line originated from stderr.  Only meaningful in Combined mode;
-    /// returns an empty vec otherwise.
-    pub fn combined_stderr_map(&self) -> Vec<bool> {
+    /// The interleaved stdout/stderr lines of the current stage (one entry per
+    /// line of the Combined-mode output).
+    pub fn current_combined_lines(&self) -> &[CombinedLine] {
         if self.pipeline.is_empty() || self.stage_outputs.is_empty() {
-            return vec![];
+            return &[];
         }
         let idx = self
             .pipeline
             .selected
             .min(self.stage_outputs.len().saturating_sub(1));
-        self.stage_outputs[idx]
-            .combined
-            .iter()
-            .map(|cl| cl.is_stderr)
-            .collect()
+        &self.stage_outputs[idx].combined
     }
 
     /// Number of display lines in current output (zero-allocation).
@@ -601,7 +586,7 @@ impl App {
         for line_idx in (0..total).rev() {
             // Parse just this one logical line into a styled ratatui Line.
             let styled = crate::ansi::ansi_text_to_visible_lines(
-                &raw,
+                raw,
                 line_idx,
                 1,
                 &no_highlights,
@@ -636,7 +621,7 @@ impl App {
 
     /// (Re-)compute search matches for the current output. Resets match index to 0.
     pub fn compute_search_matches(&mut self) {
-        let content = crate::ansi::strip_ansi_sgr(&self.current_output_text());
+        let content = crate::ansi::strip_ansi_sgr(self.current_output_text());
         self.view_mut().search.compute(&content);
     }
 

@@ -255,7 +255,7 @@ fn append_data_accumulates_stdout_bytes() {
     out.append_data(b"hello\n", b"", vec![]);
     out.append_data(b"world\n", b"", vec![]);
     assert_eq!(out.stdout, b"hello\nworld\n");
-    assert_eq!(out.stdout_text(), "hello\nworld\n");
+    assert_eq!(out.text(OutputMode::Stdout), "hello\nworld\n");
 }
 
 #[test]
@@ -264,7 +264,7 @@ fn append_data_accumulates_stderr_bytes() {
     out.append_data(b"", b"err1\n", vec![]);
     out.append_data(b"", b"err2\n", vec![]);
     assert_eq!(out.stderr, b"err1\nerr2\n");
-    assert_eq!(out.stderr_text(), "err1\nerr2\n");
+    assert_eq!(out.text(OutputMode::Stderr), "err1\nerr2\n");
 }
 
 #[test]
@@ -290,11 +290,11 @@ fn append_data_display_line_count_includes_trailing() {
 fn append_data_extends_line_index() {
     let mut out = StageOutput::empty();
     out.append_data(b"first\n", b"", vec![]);
-    let idx = out.line_index(OutputMode::Stdout).unwrap();
+    let idx = out.line_index(OutputMode::Stdout);
     assert_eq!(idx.line_count(), 2); // line 0 + line 1
 
     out.append_data(b"second\n", b"", vec![]);
-    let idx = out.line_index(OutputMode::Stdout).unwrap();
+    let idx = out.line_index(OutputMode::Stdout);
     assert_eq!(idx.line_count(), 3); // line 0, 1, 2
 }
 
@@ -331,8 +331,14 @@ fn append_data_matches_new_from_scratch() {
     from_append.append_data(&stdout[..6], &stderr[..], vec![]);
     from_append.append_data(&stdout[6..], b"", vec![]);
 
-    assert_eq!(from_append.stdout_text(), from_new.stdout_text());
-    assert_eq!(from_append.stderr_text(), from_new.stderr_text());
+    assert_eq!(
+        from_append.text(OutputMode::Stdout),
+        from_new.text(OutputMode::Stdout)
+    );
+    assert_eq!(
+        from_append.text(OutputMode::Stderr),
+        from_new.text(OutputMode::Stderr)
+    );
     assert_eq!(
         from_append.stdout_line_count(),
         from_new.stdout_line_count()
@@ -353,12 +359,12 @@ fn append_data_with_ansi_preserves_style_in_index() {
     out.append_data(b"\x1b[31mred\n", b"", vec![]);
     out.append_data(b"still\n", b"", vec![]);
 
-    let idx = out.line_index(OutputMode::Stdout).unwrap();
+    let idx = out.line_index(OutputMode::Stdout);
     // Line 1 should inherit the red style from line 0's escape.
     assert_eq!(idx.line_count(), 3); // lines 0, 1, 2
     // Verify style carry-over by rendering line 1 and checking color.
     let lines = crate::ansi::ansi_text_to_visible_lines(
-        out.stdout_text(),
+        out.text(OutputMode::Stdout),
         1,
         1,
         &std::collections::HashMap::new(),
@@ -373,10 +379,59 @@ fn append_data_with_ansi_preserves_style_in_index() {
     );
 }
 
+fn combined_line(is_stderr: bool, content: &[u8]) -> CombinedLine {
+    CombinedLine {
+        is_stderr,
+        content: content.to_vec(),
+    }
+}
+
 #[test]
-fn no_line_index_for_combined_mode() {
-    let out = StageOutput::empty();
-    assert!(out.line_index(OutputMode::Combined).is_none());
+fn combined_text_and_index_built_incrementally() {
+    // Invalid UTF-8 is decoded per line, so it can't swallow the newline.
+    let lines = vec![
+        combined_line(false, b"out1\n"),
+        combined_line(true, b"bad \xff\n"),
+        combined_line(false, b"out2"),
+    ];
+
+    let from_new = StageOutput::new(vec![], vec![], Some(0), lines.clone());
+
+    let mut from_append = StageOutput::empty();
+    from_append.append_data(b"", b"", lines[..1].to_vec());
+    from_append.append_data(b"", b"", lines[1..].to_vec());
+
+    let expected = "out1\nbad \u{FFFD}\nout2";
+    assert_eq!(from_new.text(OutputMode::Combined), expected);
+    assert_eq!(from_append.text(OutputMode::Combined), expected);
+    assert_eq!(from_new.line_index(OutputMode::Combined).line_count(), 3);
+    assert_eq!(from_append.line_index(OutputMode::Combined).line_count(), 3);
+    assert_eq!(
+        from_append.line_index(OutputMode::Combined).line_count(),
+        from_append.display_line_count(OutputMode::Combined)
+    );
+}
+
+#[test]
+fn combined_line_index_preserves_style_across_appends() {
+    let mut out = StageOutput::empty();
+    out.append_data(b"", b"", vec![combined_line(true, b"\x1b[31mred\n")]);
+    out.append_data(b"", b"", vec![combined_line(false, b"still\n")]);
+
+    let lines = crate::ansi::ansi_text_to_visible_lines(
+        out.text(OutputMode::Combined),
+        1,
+        1,
+        &std::collections::HashMap::new(),
+        Some(out.line_index(OutputMode::Combined)),
+    );
+    assert_eq!(lines.len(), 1);
+    assert!(
+        lines[0]
+            .spans
+            .iter()
+            .any(|s| s.style.fg == Some(ratatui::style::Color::Red))
+    );
 }
 
 // ---------------------------------------------------------------------------
