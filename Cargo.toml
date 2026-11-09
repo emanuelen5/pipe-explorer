@@ -20,3 +20,27 @@ time = { version = "0.3", features = ["local-offset"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+criterion = { version = "0.8.2", features = ["html_reports"] }
+
+# Benchmarks (`cargo bench`). See benches/README.md.
+[[bench]]
+name = "ansi"
+harness = false
+
+[[bench]]
+name = "output"
+harness = false
+
+[[bench]]
+name = "search"
+harness = false
+
+[[bench]]
+name = "render"
+harness = false
+
+[[bench]]
+name = "executor"
+harness = false

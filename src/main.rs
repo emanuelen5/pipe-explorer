@@ -1,17 +1,9 @@
-mod ansi;
-mod app;
-mod editor;
-mod executor;
-mod history;
-mod pipeline;
-mod search;
-mod ui;
-
 use clap::Parser;
 
-use app::{App, run};
-use history::History;
-use pipeline::Pipeline;
+use pipe_explorer::app::{self, App, run};
+use pipe_explorer::history::History;
+use pipe_explorer::pipeline::{PipeStage, Pipeline};
+use pipe_explorer::ui;
 
 const LONG_ABOUT: &str = concat!(
     "Build and inspect shell pipelines interactively",
@@ -77,7 +69,7 @@ async fn main() {
                 entry
                     .commands
                     .iter()
-                    .map(|c| crate::pipeline::PipeStage::new(c.as_str()))
+                    .map(|c| PipeStage::new(c.as_str()))
                     .collect(),
             ),
             _ => {
