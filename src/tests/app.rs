@@ -1287,7 +1287,7 @@ async fn test_history_browser_g_goes_to_top() {
 }
 
 #[tokio::test]
-async fn test_history_browser_G_goes_to_bottom() {
+async fn test_history_browser_big_g_goes_to_bottom() {
     let mut app = make_history_browser(10);
     app.handle_event(make_event("Shift+G"));
     if let AppMode::BrowsingHistory(ref b) = app.mode {
@@ -1311,7 +1311,7 @@ async fn test_history_browser_count_prefix_with_g() {
 }
 
 #[tokio::test]
-async fn test_history_browser_count_prefix_with_G() {
+async fn test_history_browser_count_prefix_with_big_g() {
     let mut app = make_history_browser(10);
     // Type "3G" to jump to entry 3 (0-indexed: 2)
     app.handle_event(make_event("3"));
