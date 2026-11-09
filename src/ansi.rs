@@ -176,6 +176,12 @@ pub struct AnsiLineIndex {
     trailing_style: AnsiStyleState,
 }
 
+impl Default for AnsiLineIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AnsiLineIndex {
     /// Create an empty index (line 0 starts at byte 0 with default style).
     pub fn new() -> Self {
